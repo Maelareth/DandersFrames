@@ -196,7 +196,11 @@ function NK:Resolve(unit)
     end
 
     local name, realm = UnitName(unit)
-    if not name or name == "" then return nil end  -- transient; don't cache
+    -- Transient states; don't cache. UNKNOWNOBJECT ("Unknown") is the
+    -- placeholder UnitName returns while a unit's real name is still loading —
+    -- its GUID is already valid then, so caching would pin "no match" to the
+    -- real player until the next cache wipe.
+    if not name or name == "" or name == UNKNOWNOBJECT then return nil end
     -- UnitName returns "" / nil realm for same-realm units; fill in the
     -- player's own realm so "Name-MyRealm" rules still match them.
     if not realm or realm == "" then
