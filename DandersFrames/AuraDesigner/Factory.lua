@@ -4146,6 +4146,119 @@ local function reconcileSoundNow(frame)
     end
 end
 
+-- ============================================================
+-- HELPER SOUND -- ARMED / DISARMED (Power Infusion helper)
+-- ============================================================
+-- ☠ SOUND IS NOT A CONTAINER, so the candidate-filter gate cannot reach it. Left alone it
+-- would keep announcing burst windows while the helper is meant to be silent -- worse than
+-- having no sound at all, because a signal that lies costs more than one that is missing. It
+-- therefore gets its own edge action: unregister on gate-close, re-register on gate-open.
+--
+-- ☠ ITS OWN STORE, NEVER store.sound. reconcileSoundNow tears down every entry in store.sound
+-- that is not in the `desired` set it just built -- and helper registrations are never in it,
+-- because collectDesiredSounds deliberately refuses filter-owned records. Put them there and
+-- the next reconcile silently kills them.
+--
+-- ☠ WHY BYPASSING collectDesiredSounds IS LEGITIMATE HERE. That bar exists because the native
+-- path is per (unit, spellID), so a 600-spell filter would mean 600 registrations per unit.
+-- The helper's list is bounded and class-narrowed below, which is the case the rule was not
+-- written for. The rule itself stays, and SyncSound's combat deferral is untouched.
+--
+-- Registration legality in combat is WATCHED, not assumed: AddAuraSound / RemoveAuraSound are
+-- legal in lockdown, a registration made mid-combat audibly fires, and registering for an
+-- ALREADY-ACTIVE aura fires nothing -- so a gate re-open mid-fight replays no backlog.
+
+-- Class narrowing. The native path costs one registration per (unit, spellID): the helper's
+-- ~60 cooldowns across a 5-man party is ~300, and a raid ~1200, toggled twice per gate cycle.
+-- A unit's CLASS is readable (only spec is secret), so each unit only needs its own class's
+-- cooldowns -- roughly a sixfold cut that scales with group size.
+--
+-- ⚠ NARROWING IS BY THE TARGET UNIT'S CLASS, and a record's `class` is the class that OWNS the
+-- spell -- the CASTER's. For burst cooldowns those coincide (they are self-buffs), which is
+-- why this is right for the helper's real list. For a buff cast ON someone else it is wrong:
+-- Power Word: Shield is class=PRIEST but lands on anyone. Switchable so a test can use a
+-- cast-on-others buff; the helper itself never should.
+local function helperSoundMapFor(unit, map)
+    if not map then return nil end
+    -- ☠ THE OWNERSHIP SENTINEL IS NOT A SPELL. It rides in the map to mark the effect as ours;
+    -- registering a sound on it arms a trigger that can never fire, and -- worse -- makes the
+    -- registration count look healthy while nothing is listening for anything real.
+    local sentinel = DF.AuraContainer and DF.AuraContainer.GetHelperSentinel
+        and DF.AuraContainer.GetHelperSentinel()
+    local R = DF.FilterRegistry
+    local _, classFile = UnitClass(unit)
+    local narrow = (Factory._helperSoundNarrow ~= false)
+    local out, n = {}, 0
+    for spellID in pairs(map) do
+        if spellID ~= sentinel then
+            local rec = narrow and R and R.ByID and R.ByID[spellID] or nil
+            -- Unknown class, or no record to attribute the spell to, means we cannot narrow --
+            -- so keep it rather than silently shrinking the helper's own list.
+            if (not narrow) or (not classFile) or (not rec)
+                or rec.class == nil or rec.class == classFile then
+                out[spellID] = true; n = n + 1
+            end
+        end
+    end
+    return n > 0 and out or nil
+end
+
+-- `cfg` is the helper's sound choice: { soundLSMKey = ... } or { soundFile = ... }.
+-- ☠ SILENT UNTIL CHOSEN. No sound configured resolves to nothing and registers nothing -- an
+-- audio cue nobody asked for is the fastest way to have the feature switched off wholesale.
+-- Returns count, reason -- a bare 0 has six different meanings and they point different ways.
+function Factory:SetHelperSoundsArmed(frame, armed, map, cfg)
+    if not frame or not frame.unit then return 0, "no frame/unit" end
+    if not soundAPIAvailable() then return 0, "sound API unavailable" end
+    local store = frame.dfADFactory
+    if not store then return 0, "frame has no AD store" end
+
+    -- Tear down first, always. Disarming and re-arming both start from nothing, so a leaked
+    -- registration cannot accumulate across edges -- the failure mode this file's own notes
+    -- warn about.
+    local live = store.helperSound
+    if live then
+        for _, id in ipairs(live.ids or {}) do unregisterAuraSound(id) end
+        store.helperSound = nil
+    end
+    if not armed then return 0, "disarmed" end
+
+    -- ☠ NEVER THE PLAYER'S OWN UNIT. The native sound path has NO CASTER FILTER, so an
+    -- othersOnly effect's sound still fires for the player's own casts. Not fixable in the
+    -- registration -- but unitToken is per registration, so we simply never register for
+    -- ourselves. This is also the Twins of the Sun Priestess case: that talent copies every
+    -- Power Infusion back onto the priest.
+    if UnitIsUnit(frame.unit, "player") then return 0, "own unit (never registered, by design)" end
+
+    local argKey, argVal = resolveSoundArg(cfg or {})
+    if not argKey then return 0, "sound name did not resolve" end
+
+    local narrowed = helperSoundMapFor(frame.unit, map)
+    if not narrowed then return 0, "no spells after class narrowing" end
+
+    local adDB = DF.ResolveAuraDesigner and DF:ResolveAuraDesigner(frame)
+    local channel = resolveSoundChannel(adDB)
+    local ids = {}
+    for spellID in pairs(narrowed) do
+        -- "applied" only: the helper announces a window OPENING. Dropped / stackGained are not
+        -- signals this feature has.
+        local id = registerAuraSound("applied", frame.unit, spellID, argKey, argVal, channel)
+        if id ~= nil then ids[#ids + 1] = id end
+    end
+    store.helperSound = { ids = ids }
+    return #ids, (#ids > 0) and "ok" or "AddAuraSound returned nothing"
+end
+
+-- Release helper registrations for one frame. Called from ClearFrame alongside the container
+-- stores, because a registration outliving its frame is a leak with no owner.
+function Factory:ClearHelperSounds(frame)
+    local store = frame and frame.dfADFactory
+    local live = store and store.helperSound
+    if not live then return end
+    for _, id in ipairs(live.ids or {}) do unregisterAuraSound(id) end
+    store.helperSound = nil
+end
+
 -- Frames whose sound reconcile is deferred to combat-end (weak-keyed so a dropped frame GCs).
 Factory._soundPending = Factory._soundPending or setmetatable({}, { __mode = "k" })
 local soundRegenFrame
@@ -6134,6 +6247,9 @@ function Factory:ClearFrame(frame)
     teardownExcept(store.fgroups or {}, nil)  -- filter-group containers (A5)
     teardownExcept(store.dgroups or {}, nil)  -- debuff-group containers (C1)
     teardownExcept(store.nametext or {}, nil)
+    -- ☠ HELPER SOUND. Not a container, so no teardownExcept arm covers it -- a registration
+    -- outliving its frame is a leak with no owner.
+    Factory:ClearHelperSounds(frame)
     teardownExcept(store.healthtext or {}, nil)
     -- Release the Text Designer mirror covers owned by the two text containers above.
     if DF.TextDesigner and DF.TextDesigner.Render then

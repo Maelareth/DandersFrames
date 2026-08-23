@@ -671,10 +671,99 @@ local function deriveSort(config)
     return sortMethod, sortDirection
 end
 
+-- ============================================================
+-- HELPER GATE (Power Infusion helper) -- THE PUSH CHOKEPOINT
+-- ============================================================
+-- ☠ WHY THE GATE LIVES HERE AND NOWHERE ELSE.
+-- Every engine write of candidate filters for group/overlay/row containers funnels through
+-- recordCandidateFilters below: `_build` (:3141) declaring groups, and `applyGroupTuning`
+-- (:3556) pushing the cfByKey map. Two sites, and nothing reaches the engine except through
+-- one of them. (Two further readers -- the `cfOf` closure at :3336 and the diagnostic dump
+-- at :8542 -- are debug-only and never reach the engine.)
+--
+-- Gating HERE rather than in stored config is the whole design:
+--   * Stored config always carries the LIVE map, so no signature ever lies and the Factory
+--     needs no knowledge of gate state.
+--   * A rebuild produces a fresh config that is EXACTLY AS GATED as the old one, because
+--     gating happens after config, on the way out.
+--   * There is therefore nothing to clobber and no race to keep winning. The first design
+--     (swap the live map, re-assert after every rebuild) was a race against every rebuild
+--     path anyone might add later; this removes the thing being clobbered instead.
+--
+-- ☠ AND IT DISSOLVES THE INTENT-VS-REALITY SPLIT. There is no second copy of the truth: the
+-- engine value is DERIVED from this switch by every pusher, on every push. Edge detection
+-- becomes an optimisation of WHEN to broadcast, never a record of what containers hold, so a
+-- spent edge cannot strand reality -- the next flush of any kind re-derives from the switch.
+--
+-- The dead map is a populated set matching nothing, never an empty table: an empty include
+-- set reads as "no selection", which the engine is free to treat as "everything passes".
+local HELPER_GATE_DEAD_CF = { includeSpellIDs = { [1] = true } }
+local helperGateDark = false
+
+-- ☠ OWNERSHIP: THE SENTINEL. The gate must only ever darken our own effects. The first cut
+-- asked "does this container watch the spell we care about", which also caught a USER'S
+-- effect on the same spell -- darkened by a feature they never enabled, for a reason nothing
+-- on screen explains. Harmless while the helper watched one throwaway buff; unacceptable once
+-- it watches sixty real cooldowns.
+--
+-- The marker is one id carried in the helper's OWN filter data. It rides into the resolved
+-- map like any other spell (Registry.lua:964 puts unmuted rawIDs straight into the include
+-- map) and the funnel reads its presence as "ours". Nothing outside our own data changes, and
+-- a user's effect cannot contain it by accident.
+--
+-- Sits far above any real spell (SpellDB's highest is 1310372) and is absent from the
+-- database, so GetCustomFilter's re-bucketing -- which promotes a rawID the moment SpellDB
+-- learns it -- leaves it raw forever. It matches no aura.
+--
+-- ⚠ Long-term home is a marker threaded through the container config, written by the recipe.
+-- That is ~13 mechanical edits across the config builders and is Danders' call. Escalated,
+-- not blocking. See .claude/for-danders.md.
+local HELPER_GATE_SENTINEL = 1999000060
+
+-- ⚠ NO "ARMED" FLAG. There was one, and it only ever caused a bug: ownership is a property of
+-- the MAP, not of whether anything has flipped a switch yet. Gating is decided below by
+-- (gate shut OR role excluded), so with neither true nothing darkens regardless -- which is
+-- what the flag was for. Its only real effect was that role exclusion silently did nothing
+-- until an unrelated gate command happened to arm it first.
+local function helperGateIsOurs(cf)
+    local inc = cf and cf.includeSpellIDs
+    return (inc and inc[HELPER_GATE_SENTINEL]) and true or false
+end
+
+function AuraContainer.GetHelperSentinel() return HELPER_GATE_SENTINEL end
+
+-- ═══ ROLE EXCLUSION ═══
+-- Never mark someone you would not infuse. The cooldown gate is ONE switch for everyone; this
+-- is PER UNIT, and it works at the same chokepoint because the container config carries
+-- `unit` (buildBorderConfig et al, Factory.lua:1028).
+--
+-- ⚠ FAILS OPEN, DELIBERATELY. DF:GetUnitRole answers nil or "NONE" when a group has no
+-- assigned roles -- common in hand-made groups, never in queued content. Everyone then reads
+-- as "no role" and nothing is excluded. Marking a tank you did not want is a much smaller
+-- failure than silently hiding the signal on the damage dealers you did.
+--
+-- ⚠ AND IT CAN BE STALE. UnitGroupRolesAssigned is the ASSIGNED role, not the spec's role:
+-- switching spec mid-dungeon does not update it until the group re-forms (watched 2026-08-23).
+-- Unfixable for other players -- their spec is secret in 12.1.
+local helperExcludedRoles = nil   -- e.g. { TANK = true, HEALER = true }
+
+local function helperRoleExcluded(unit)
+    if not (helperExcludedRoles and unit) then return false end
+    local role = DF.GetUnitRole and DF:GetUnitRole(unit)
+    if not role or role == "NONE" then return false end   -- fail open
+    return helperExcludedRoles[role] == true
+end
+
 -- A record's candidateFilters REPLACES the config-wide set for that group/slot
 -- (the dispel overlay's per-type slots) — see normalizeFilters.
 local function recordCandidateFilters(rec, config)
-    return rec.candidateFilters or config.candidateFilters
+    local cf = rec.candidateFilters or config.candidateFilters
+    -- Two independent reasons to go dark: the cooldown switch (everyone at once) and this
+    -- unit's role (this frame only). Both resolve to the same dead map.
+    if helperGateIsOurs(cf) and (helperGateDark or helperRoleExcluded(config.unit)) then
+        return HELPER_GATE_DEAD_CF
+    end
+    return cf
 end
 
 -- IDENTITY-GATE EXPOSURE (12.1, live-confirmed 2026-07-17, widened 2026-07-18).
@@ -6014,6 +6103,68 @@ function Handle:ApplyTuning(tuning)
         self.backend:applyGroupTuning()
     end
 end
+
+-- ═══ HELPER GATE: BROADCAST AND BACKSTOP ═══
+-- Does this handle carry one of ours? Checked against STORED config, never the gated result,
+-- so it answers the same either side of an edge.
+local function helperGateHandleIsOurs(h)
+    local cfg = h and h.config
+    if not cfg then return false end
+    if helperGateIsOurs(cfg.candidateFilters) then return true end
+    for _, rec in ipairs(normalizeFilters(cfg.filter)) do
+        if helperGateIsOurs(rec.candidateFilters) then return true end
+    end
+    return false
+end
+
+-- Flip the switch and broadcast. Returns how many containers were re-pushed.
+-- ☠ The broadcast is an ALREADY-CLEARED in-combat operation: applyGroupTuning is what the
+-- consumers already call, and the probe cleared it. Only the table it carries changes. Note
+-- it pushes filter strings and max/sort alongside candidate filters, so a gate edge
+-- early-flushes any _pendingTuning a container queued mid-combat.
+--
+-- ☠ ONLY OUR CONTAINERS. applyGroupTuning runs an immediate UpdateAllAuras per group key and
+-- has no equality guard of its own, so broadcasting to every handle in the addon would cost a
+-- full aura re-parse on each one for a gate flip that concerns a handful.
+function AuraContainer.SetHelperGate(dark)
+    helperGateDark = dark and true or false
+    local n = 0
+    for h in pairs(AuraContainer._handles or {}) do
+        local b = h and h.backend
+        if b and b.applyGroupTuning and not h._destroyed and helperGateHandleIsOurs(h) then
+            local ok = pcall(function() b:applyGroupTuning() end)
+            if ok then n = n + 1 end
+        end
+    end
+    return n
+end
+
+function AuraContainer.GetHelperGate() return helperGateDark, helperExcludedRoles ~= nil end
+
+function AuraContainer.SetHelperExcludedRoles(roles)
+    helperExcludedRoles = roles
+    return AuraContainer.SetHelperGate(helperGateDark)   -- re-push so it takes effect now
+end
+
+function AuraContainer.GetHelperExcludedRoles() return helperExcludedRoles end
+
+-- Backstop for pushes swallowed during lockdown by the pcall'd native setters. Idempotent,
+-- out of combat, and the same shape the identity gate already uses for its combat-exit
+-- re-verify.
+--
+-- ☠ ROLES ARE READ AT PUSH TIME, so a role that changes after the last push is not seen: set
+-- the exclusions, swap spec, and the container keeps the answer from before the swap. Re-push
+-- on anything that can move a role. (This makes us notice promptly when the game's answer
+-- CHANGES. It cannot make the game's answer FRESH -- see the staleness note above.)
+local helperGateRegen = CreateFrame("Frame")
+helperGateRegen:RegisterEvent("PLAYER_REGEN_ENABLED")
+helperGateRegen:RegisterEvent("PLAYER_ROLES_ASSIGNED")
+helperGateRegen:RegisterEvent("GROUP_ROSTER_UPDATE")
+helperGateRegen:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+helperGateRegen:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
+helperGateRegen:SetScript("OnEvent", function()
+    AuraContainer.SetHelperGate(helperGateDark)
+end)
 
 -- Force a re-scan of the container. 68569: UpdateAllAuras() is an addon-callable
 -- dirty-mark (processed on the next OnUpdate while visible) — the real refresh. Use on
