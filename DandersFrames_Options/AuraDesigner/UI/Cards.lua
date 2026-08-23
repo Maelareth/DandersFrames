@@ -179,17 +179,27 @@ end
 local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel, wipeFirst)
     local R = DF.FilterRegistry
     if not (R and R.CreateCustomFilter) then return nil end
-    local id = pihFilterIdByName(name) or R:CreateCustomFilter(name)
+    local existing = pihFilterIdByName(name)
+    local id = existing or R:CreateCustomFilter(name)
     if not id then return nil end
     if wipeFirst then
         local f = R:GetCustomFilter(id)
         if f then f.spells, f.rawIDs = {}, {} end
     end
-    for _, catKey in ipairs(presetKeys or {}) do
-        local recs = R.ByCategory and R.ByCategory[catKey]
-        for _, rec in ipairs(recs or {}) do R:AddSpellToCustom(id, rec.id) end
+    -- ☠ SEED ONLY WHAT WE JUST BUILT. Re-seeding an existing list on every create would undo
+    -- both kinds of trimming the user is entitled to: the class ticks, and any hand edit made
+    -- on the Filters page. A list that quietly refills itself is not a list anyone can own.
+    -- (The amplifier list passes wipeFirst and so is always rebuilt -- correctly, because its
+    -- contents ARE the two amplifier ticks and nothing else.)
+    if (not existing) or wipeFirst then
+        for _, catKey in ipairs(presetKeys or {}) do
+            local recs = R.ByCategory and R.ByCategory[catKey]
+            for _, rec in ipairs(recs or {}) do R:AddSpellToCustom(id, rec.id) end
+        end
+        for _, sid in ipairs(extraIDs or {}) do R:AddSpellToCustom(id, sid) end
     end
-    for _, sid in ipairs(extraIDs or {}) do R:AddSpellToCustom(id, sid) end
+    -- The sentinel is re-asserted every time regardless: it is ownership rather than content,
+    -- and a list without it is a list the gate cannot recognise as ours.
     if withSentinel then
         local s = pihSentinel()
         if s then R:AddSpellToCustom(id, s) end
@@ -261,6 +271,9 @@ function P.PIH_Apply()
     -- Gate off means "never hide": force the gate open and leave it there.
     local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
     if Engine and Engine.PIH_SetGateEnabled then Engine:PIH_SetGateEnabled(s.gateEnabled ~= false) end
+    -- After the gate, never before: the sound arms against the gate's current state, so doing
+    -- it first would arm against the state we are about to leave.
+    if P.PIH_ApplySound then P.PIH_ApplySound() end
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -362,6 +375,264 @@ local function pihDeleteSignal(key)
     return true
 end
 
+
+-- ─────────────────────────────────────────────────────────────
+-- WHICH SURFACE A SIGNAL DRAWS ON
+-- ─────────────────────────────────────────────────────────────
+local PIH_SURFACE_ORDER = { "border", "healthbar", "background", "nametext", "healthtext" }
+
+-- ☠ ONLY THREE OF THE FIVE CONTEND, and the difference is watched in game, not read.
+-- Border, name text and health text resolve through `pickWinner`, which takes ONE winner per
+-- surface from config alone and tears every other candidate down. Health bar and background
+-- tints are MULTI -- `collectFrameTints` renders each on its own presence-gated container,
+-- because a static pick cannot ask what is actually on a unit when presence is secret.
+-- So a clash warning on those two would be a lie, and a warning that cannot be true is worse
+-- than no warning at all.
+local PIH_CONTENDED = { border = true, nametext = true, healthtext = true }
+
+-- The exact candidacy test each contended surface applies, copied from the call sites rather
+-- than approximated -- a warning that fires when the user has ALREADY applied the fix is worse
+-- than one that never fires.
+--   border     : ShowBorder ~= false and borderMode ~= "custom"   (Factory.lua:5682)
+--                ⭐ "Give this aura its own border" opts an effect OUT of the contest entirely
+--                (collectStackedBorders), so it must not count as a clash.
+--   name/health: c.color and not c.showWhenMissing                (the TEXT_MIRROR_TYPES pick)
+local function pihContends(surface, cfg)
+    if type(cfg) ~= "table" or cfg.enabled == false then return false end
+    if surface == "border" then
+        return cfg.ShowBorder ~= false and cfg.borderMode ~= "custom"
+    end
+    return cfg.color ~= nil and not cfg.showWhenMissing
+end
+
+-- Both aura pools, READ-ONLY.
+-- ☠ NEVER THROUGH GetOtherAuras: that accessor CREATES adDB.otherAuras, and merely looking at
+-- a settings panel must not write to the profile. The same rule CurrentAuraPool follows.
+local function pihPools()
+    local out = {}
+    local adDB = GetAuraDesignerDB()
+    if not adDB then return out end
+    local spec = ResolveSpec and ResolveSpec()
+    local mine = spec and adDB.auras and adDB.auras[spec]
+    if type(mine) == "table" then out[#out + 1] = mine end
+    if type(adDB.otherAuras) == "table" then out[#out + 1] = adDB.otherAuras end
+    return out
+end
+
+-- What an effect calls itself, in the same order the effects list resolves it: its own label
+-- first (only helper effects carry one today), then the registry's name for a filter-owned
+-- record, then the pool key -- which for an ordinary record IS the aura's name.
+local function pihEffectName(auraName, cfg)
+    if type(cfg) == "table" and cfg.label then return cfg.label end
+    local named = DF.ADFilterRefDisplayName and DF:ADFilterRefDisplayName(auraName)
+    return named or auraName
+end
+
+-- How many of the USER'S OWN effects would fight this signal for the surface, and what the
+-- first one is called. Ours are skipped: two helper signals on one contended surface are
+-- prevented outright by the menu, so counting them here would report the same fact twice in
+-- two different voices.
+-- Scans BOTH pools, because pickWinner does -- a clash living on the other tab is still a clash.
+-- ⚠ NAMING THE OFFENDER IS THE POINT. "Something else colours the border" sends someone hunting
+-- through their own effects list; naming it turns the warning into an instruction. When several
+-- contend, the count says so rather than pretending the named one is the only problem.
+function P.PIH_ClashOn(surface)
+    if not PIH_CONTENDED[surface] then return 0, nil end
+    local n, name = 0, nil
+    for _, pool in ipairs(pihPools()) do
+        for auraName, auraCfg in pairs(pool) do
+            if type(auraCfg) == "table" then
+                local cfg = auraCfg[surface]
+                if type(cfg) == "table" and not cfg.pihSignal and pihContends(surface, cfg) then
+                    n = n + 1
+                    if not name then name = pihEffectName(auraName, cfg) end
+                end
+            end
+        end
+    end
+    return n, name
+end
+
+-- Which OTHER helper signal is sitting on this surface, if any.
+-- ⚠ ANY shared surface is refused, contended or not -- for two different reasons that happen to
+-- point the same way. Burst and strong live on ONE record (one spell list, on purpose), and a
+-- record holds one effect per surface, so sharing there is an overwrite, not a contest. Infused
+-- is a separate record, so on a contended surface it would win or lose against its own sibling.
+-- Neither is ever what someone meant, so one rule covers both: a surface in use is not offered.
+local function pihSurfaceTakenBy(surface, exceptKey)
+    for key, hit in pairs(pihFound()) do
+        if key ~= exceptKey and hit.typeKey == surface then return key end
+    end
+    return nil
+end
+
+function P.PIH_SurfaceOf(key)
+    local hit = pihFound()[key]
+    return hit and hit.typeKey or nil
+end
+
+-- The dropdown's option set, rebuilt per signal because what is available depends on where the
+-- other two are sitting.
+-- ☠ A TAKEN SURFACE IS GREYED, NOT REMOVED. `header = true` renders a menu row non-clickable
+-- and the dim colour is the addon's unavailable treatment -- so the option stays on screen
+-- carrying the reason it cannot be picked. Dropping the row instead would leave someone
+-- wondering where Border went.
+function P.PIH_SurfaceOptions(key)
+    local labels = S.FRAME_LEVEL_LABELS or {}
+    local opts = { _order = {} }
+    for _, surface in ipairs(PIH_SURFACE_ORDER) do
+        local label = labels[surface] or surface
+        local takenBy = pihSurfaceTakenBy(surface, key)
+        if takenBy then
+            opts[surface] = {
+                text   = format(L["%s (used by %s)"], label, pihLabel(takenBy)),
+                header = true,
+                color  = { r = 0.45, g = 0.45, b = 0.45 },
+            }
+        else
+            opts[surface] = label
+        end
+        opts._order[#opts._order + 1] = surface
+    end
+    return opts
+end
+
+-- ☠ THE COLOUR TRAVELS; NOTHING ELSE DOES. Decided 2026-08-23 with the user. The five surfaces
+-- do not share a settings vocabulary -- a border has a style, a thickness and an inset, a health
+-- bar has Replace-vs-Tint and a blend -- so carrying settings across would mean inventing
+-- equivalences that do not exist. The colour is the one thing every surface genuinely has, and
+-- it is read from the OLD surface's key and written to the NEW one, because a border keeps its
+-- colour under a different name (see pihColorKey).
+function P.PIH_SetSurface(key, surface)
+    local hit = pihFound()[key]
+    if not hit then return false, "that signal is not on" end
+    if hit.typeKey == surface then return true end
+    if not PIH_SIGNALS[key] then return false, "no such signal" end
+    if pihSurfaceTakenBy(surface, key) then return false, "another signal is already there" end
+
+    local pool = CurrentAuraPool()
+    local auraCfg = pool and pool[hit.auraName]
+    if not auraCfg then return false, "the record went missing" end
+    -- Somebody else's effect already on that surface of OUR record cannot happen -- the record
+    -- is identified by a helper spell list -- but a stale one of ours could, so refuse rather
+    -- than overwrite something we did not read.
+    if auraCfg[surface] ~= nil then return false, "that surface is occupied" end
+
+    local colour     = hit.cfg[pihColorKey(hit.typeKey)]
+    local conditions = hit.cfg.conditions
+    auraCfg[hit.typeKey] = nil
+
+    local cfg = EnsureTypeConfig(hit.auraName, surface)
+    if not cfg then return false, "could not create the effect" end
+    cfg.pihSignal  = key
+    cfg.label      = pihLabel(key)
+    cfg.othersOnly = true
+    cfg.enabled    = true
+    cfg.conditions = conditions
+    if colour then
+        cfg[pihColorKey(surface)] = { r = colour.r, g = colour.g, b = colour.b, a = colour.a or 1 }
+    end
+    pihRefresh()
+    return true
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SOUND
+-- ─────────────────────────────────────────────────────────────
+-- ☠ THE HELPER OWNS THIS ENTRY END TO END. The generic effects list refuses to show `sound` on
+-- a filter-owned record -- the native path registers per spell ID, so one big filter would mean
+-- one registration per spell in it -- which means it offers no row and no delete button for it
+-- either. So the control lives here, and PIH_Remove clears it, because nothing else can.
+-- ⚠ Two settings, not one: the key remembers WHICH sound, the switch remembers WHETHER. Turning
+-- it off and on again should not make someone hunt for their sound a second time.
+function P.PIH_ApplySound()
+    local s = P.PIH_Settings()
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.PIH_SetSound then
+        Engine:PIH_SetSound(s.soundOn and s.soundLSMKey or nil)
+    end
+end
+
+function P.PIH_SetSoundOn(on)
+    P.PIH_Settings().soundOn = on and true or nil
+    P.PIH_ApplySound()
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- ONLY WATCH -- whose cooldowns count
+-- ─────────────────────────────────────────────────────────────
+-- ⚠ CLASSES, NOT SPECS, AND THAT IS THE DATA RATHER THAN A CHOICE. Every record in the spell
+-- database carries a class and nothing finer -- there is no spec field in it anywhere. Offering
+-- "only watch Fire Mages" would mean hand-authoring which spec each of forty-five cooldowns
+-- belongs to and re-authoring it every patch: a dataset to maintain, not a control to build.
+-- ⚠ RACIALS ARE TAGGED "ALL" and belong to everyone, so no class tick ever removes one.
+local function pihClassList()
+    local R = DF.FilterRegistry
+    local present = {}
+    for _, catKey in ipairs(PIH_SEED.cooldowns) do
+        for _, rec in ipairs((R and R.ByCategory and R.ByCategory[catKey]) or {}) do
+            if rec.class and rec.class ~= "ALL" then present[rec.class] = true end
+        end
+    end
+    local out = {}
+    -- The registry's own canonical order, read at call time because SpellPicker.lua loads AFTER
+    -- this file. Borrowed rather than restated so the helper's list reads in the same order as
+    -- the spell picker's instead of in a second order of our own invention.
+    for _, token in ipairs((R and R.PickerClassOrder) or {}) do
+        if present[token] then out[#out + 1] = token end
+    end
+    return out
+end
+P.PIH_ClassList = pihClassList
+
+-- ☠ READ OFF THE LIST, NOT OFF A SETTING. A tick is on when the list still holds at least one
+-- of that class's cooldowns -- so the box and the Filter Designer are two views of one thing
+-- rather than two records that can disagree. Remove Avatar and the rest by hand over there and
+-- Warrior unticks itself here; add one back and it re-ticks. The same reason the signals
+-- themselves are read off the effects: a second copy of the truth only ever drifts.
+function P.PIH_ClassOn(classFile)
+    local R = DF.FilterRegistry
+    local id = pihFilterIdByName(PIH_FILTERS.cooldowns)
+    local f = id and R and R.GetCustomFilter and R:GetCustomFilter(id)
+    -- No list yet means nothing has been taken away yet.
+    if not f then return true end
+    for _, catKey in ipairs(PIH_SEED.cooldowns) do
+        for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
+            if rec.class == classFile and (f.spells[rec.id] or f.rawIDs[rec.id]) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Adds or removes exactly one class's cooldowns from the helper's list. Surgical on purpose:
+-- a wipe-and-refill would also undo every hand edit made on the Filters page, and hand editing
+-- is the finer control this one deliberately does not try to replace.
+local function pihApplyClass(classFile, on)
+    local R = DF.FilterRegistry
+    local id = pihFilterIdByName(PIH_FILTERS.cooldowns)
+    if not (id and R) then return end
+    for _, catKey in ipairs(PIH_SEED.cooldowns) do
+        for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
+            if rec.class == classFile then
+                if on then R:AddSpellToCustom(id, rec.id)
+                else R:RemoveSpellFromCustom(id, rec.id) end
+            end
+        end
+    end
+end
+
+-- ⚠ NOTHING IS STORED. An earlier pass kept an "excluded classes" table beside the list and
+-- re-applied it whenever the list was rebuilt. That was a second copy of the truth, and it went
+-- out of step the moment anyone edited the list in the Filter Designer: the box would still
+-- show Warrior unticked while the spells were back, or the reverse. The tick reads the list, the
+-- click edits the list, and there is nothing in between for the two to disagree about.
+function P.PIH_SetClassOn(classFile, on)
+    pihApplyClass(classFile, on)
+    pihRefresh()
+end
+
 -- ─────────────────────────────────────────────────────────────
 -- ADD / REMOVE / TICK
 -- ─────────────────────────────────────────────────────────────
@@ -397,6 +668,12 @@ function P.PIH_Remove()
         local id = pihFilterIdByName(name)
         if id and R and R.DeleteCustomFilter then R:DeleteCustomFilter(id) end
     end
+
+    -- ☠ SOUND IS NOT A CONTAINER, so nothing above reaches it. Removing the helper has to
+    -- silence it explicitly or the announcements outlive the feature that made them.
+    -- The SETTING is left alone: it is behaviour, and behaviour survives a remove.
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.PIH_SetSound then Engine:PIH_SetSound(nil) end
 
     pihRefresh()
     return true, ("removed %d signal(s) and their spell lists"):format(n)
@@ -3045,8 +3322,8 @@ S.BuildEffectsTab = function()
         -- Appearance (colour, border style, which surface) stays on the effect rows, because
         -- that genuinely differs per signal and is where the AD already puts appearance.
         if exists and pihBlock.expanded then
-            local function pihGroup(header, buildFn)
-                local group = GUI:CreateSettingsGroup(parent, (parent:GetWidth() or 320) - 26)
+            local function pihGroup(header, buildFn, opts)
+                local group = GUI:CreateSettingsGroup(parent, (parent:GetWidth() or 320) - 26, opts)
                 group.padding = 10
                 group:AddWidget(GUI:CreateHeader(parent, header), GUI.RowHeight.sectionHeader)
                 buildFn(group)
@@ -3067,6 +3344,42 @@ S.BuildEffectsTab = function()
                         S.SwitchTab("effects")   -- the dependent groups appear and vanish with it
                     end), 24)
                 g:AddWidget(GUI:CreateLabel(parent, desc), 26)
+
+                -- The surface picker, and it only exists while the signal does: "where does
+                -- this draw" is not a question about a signal that draws nothing.
+                local surface = P.PIH_SurfaceOf(key)
+                if not surface then return end
+
+                -- Inline, so the checkbox above is its label. A second heading saying
+                -- "Surface" over every row would triple the words for no added meaning.
+                g:AddWidget(GUI:CreateDropdown(parent, label, P.PIH_SurfaceOptions(key),
+                    nil, nil, nil,
+                    function() return P.PIH_SurfaceOf(key) end,
+                    function(v)
+                        P.PIH_SetSurface(key, v)
+                        S.SwitchTab("effects")   -- the other rows' menus re-grey around it
+                    end,
+                    { inline = true }), 26)
+
+                -- ⚠ THE CLASH WARNING, AND IT IS SCOPED ON PURPOSE. pickWinner decides from
+                -- config alone and never asks what is on the unit, so a clash is fully knowable
+                -- while someone is setting it up -- no guessing, no "this might happen".
+                -- It appears only on the three surfaces that actually take a single winner, and
+                -- it names the fix that exists rather than describing the problem.
+                local clashes, who = P.PIH_ClashOn(surface)
+                if clashes > 0 then
+                    who = who or L["Another effect"]
+                    -- More than one contender: naming only the first would read as "fix this
+                    -- one and you are done", which would not be true.
+                    if clashes > 1 then who = format(L["%s and %d more"], who, clashes - 1) end
+                    local banner = GUI:CreateInfoBanner(parent, {
+                        tone = "caution",
+                        text = (surface == "border")
+                            and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
+                            or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
+                    })
+                    g:AddWidget(banner, banner.layoutHeight)
+                end
             end
 
             pihGroup(L["WHAT TO MARK"], function(g)
@@ -3127,6 +3440,71 @@ S.BuildEffectsTab = function()
                     function(v) P.PIH_SetRole("HEALER", v) end), 24)
                 g:AddWidget(GUI:CreateLabel(parent,
                     L["Groups without assigned roles are never excluded."]), 26)
+            end)
+
+            -- ☠ COLLAPSIBLE, AND THIRTEEN ROWS IS WHY. Everything else in this panel is two or
+            -- three ticks; a class list is as long as the game has classes, and most people
+            -- will never open it. The summary on the header carries the state while it is
+            -- folded, so the box does not have to be open to be honest.
+            pihGroup(L["ONLY WATCH"], function(g)
+                local anyOff = false
+                for _, token in ipairs(P.PIH_ClassList()) do
+                    local classFile = token
+                    if not P.PIH_ClassOn(classFile) then anyOff = true end
+                    -- Read at call time: SpellPicker.lua loads after this file, so the display
+                    -- helper does not exist yet at file scope.
+                    local name = (DF.FilterRegistry and DF.FilterRegistry.ClassDisplayName
+                        and DF.FilterRegistry.ClassDisplayName(classFile)) or classFile
+                    g:AddWidget(GUI:CreateCheckbox(parent, name, nil, nil, nil,
+                        function() return P.PIH_ClassOn(classFile) end,
+                        function(v) P.PIH_SetClassOn(classFile, v) end), 24)
+                end
+                -- ⚠ The pointer is not a consolation prize. This box does classes because the
+                -- spell data records classes; anyone who wants one spell gone has a real editor
+                -- for it, and saying so is the difference between a limit and a dead end.
+                -- ☠ AND IT IS THE SAME LIST FROM BOTH ENDS. These ticks read the list rather
+                -- than a stored copy of it, so an edit made over there shows up here on the way
+                -- back -- untick every Warrior cooldown by hand and Warrior unticks itself.
+                g:AddWidget(GUI:CreateLabel(parent, anyOff
+                    and L["Unticked classes' cooldowns have been taken out of the helper's spell list. The same list is editable spell by spell in the Filter Designer."]
+                    or  L["Untick a class to stop watching its cooldowns. The same list is editable spell by spell in the Filter Designer."]), 40)
+
+                -- Reusing the jump this page already offers rather than a second way of getting
+                -- there, disabled state included: a button that goes nowhere is worse than none.
+                local fdBtn = GUI:CreateButton(parent, L["Filter Designer"], 140, 22, function()
+                    if GUI.SelectTab and GUI.Pages and GUI.Pages["auras_filterdesigner"] then
+                        GUI.SelectTab("auras_filterdesigner")
+                    end
+                end)
+                if not (GUI.Pages and GUI.Pages["auras_filterdesigner"]) then
+                    fdBtn:Disable()
+                    fdBtn.Text:SetTextColor(0.4, 0.4, 0.4)
+                end
+                g:AddWidget(fdBtn, 28)
+            -- ⚠ NO showSummary. The collapsed summary concatenates every child label, which for
+            -- thirteen classes and a two-line note is a wall of text rather than a summary. The
+            -- header alone says what is folded away, which is what a summary was for.
+            end, { collapsible = true, collapseKey = "pihelper:onlywatch" })
+
+            pihGroup(L["SOUND"], function(g)
+                -- ☠ TWO SETTINGS, NOT ONE. The key remembers WHICH sound, the switch remembers
+                -- WHETHER -- so turning it off and back on does not make anyone hunt for their
+                -- sound a second time. Silent until chosen, either way: a cue nobody asked for
+                -- is the fastest route to the whole feature being switched off.
+                g:AddWidget(GUI:CreateCheckbox(parent, L["Play a sound when a window opens"],
+                    nil, nil, nil,
+                    function() return P.PIH_Settings().soundOn == true end,
+                    function(v) P.PIH_SetSoundOn(v); S.SwitchTab("effects") end), 24)
+                if P.PIH_Settings().soundOn then
+                    g:AddWidget(GUI:CreateSoundDropdown(parent, L["Sound"],
+                        P.PIH_Settings(), "soundLSMKey",
+                        function() P.PIH_ApplySound() end), 54)
+                    -- ⚠ Stated rather than discovered in a fight: sound rides the same gate as
+                    -- the visuals, and it announces new windows only -- a window already open
+                    -- when the gate re-opens stays silent, because the visuals already carry it.
+                    g:AddWidget(GUI:CreateLabel(parent,
+                        L["Silent while Power Infusion is on cooldown, and never for your own casts."]), 26)
+                end
             end)
 
         end

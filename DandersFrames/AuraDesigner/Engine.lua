@@ -366,6 +366,21 @@ end
 
 function Engine:PIH_IsGateEnabled() return pihGateEnabled end
 
+-- ☠ THE SOUND CHOICE HAS TO BE APPLIED, NOT MERELY STORED. Until now it lived only in the
+-- file-local above, set by `/dfpi sound` and gone on the next reload -- and PIH_ApplySaved
+-- never armed sound at all, so a player who picked one and logged out had picked nothing.
+-- The panel saves the key with the helper's other settings; this is the one place that turns a
+-- saved key into live registrations, and it is called from both the panel and the login path.
+-- An empty or missing key means SILENT: no sound was ever a default, and an audio cue nobody
+-- asked for is the fastest way to have a feature switched off wholesale.
+function Engine:PIH_SetSound(lsmKey)
+    pihSoundCfg = (type(lsmKey) == "string" and lsmKey ~= "") and { soundLSMKey = lsmKey } or nil
+    -- Armed only while the gate is open: sound is not a container, so nothing the gate does to
+    -- the visuals reaches it -- it needs its own edge action or it announces windows during the
+    -- exact minutes the helper is meant to be silent.
+    return pihSoundsArmed(pihGateOpen and pihSoundCfg ~= nil)
+end
+
 -- ☠ THE RESIDENT HALF READS THE SAVED SETTINGS ITSELF. The panel that writes them lives in
 -- the load-on-demand options addon, so anything that only applied when the panel was open
 -- would silently not apply to a player who never opens their settings -- which is most of
@@ -384,6 +399,9 @@ function Engine:PIH_ApplySaved()
         DF.AuraContainer.SetHelperExcludedRoles(any and s.roles or nil)
     end
     Engine:PIH_SetGateEnabled(s.gateEnabled ~= false)
+    -- After the gate, never before: SetSound arms against the gate's current state, so calling
+    -- it first would arm against the state we are about to leave.
+    Engine:PIH_SetSound(s.soundOn and s.soundLSMKey or nil)
     return true
 end
 

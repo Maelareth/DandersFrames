@@ -2841,6 +2841,18 @@ L["Strong window"] = true
 L["A big cooldown and a potion or trinket — they are going all in."] = true
 L["Already infused"] = true
 L["They already have Power Infusion — do not double up."] = true
+-- Surface picker. A surface another signal already holds stays in the menu, greyed, carrying
+-- the reason it cannot be picked -- so the placeholder is the signal's name, not the surface's.
+L["%s (used by %s)"] = true
+-- Clash warnings. Shown only on the three surfaces that take a single winner, and each names
+-- the remedy that already exists rather than describing the problem.
+-- The offender is NAMED: "something else colours the border" sends someone hunting through
+-- their own effects list, where a name turns the warning into an instruction. %s is that name,
+-- or the "%s and %d more" form when several contend.
+L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."] = true
+L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."] = true
+L["%s and %d more"] = true
+L["Another effect"] = true
 -- Shared settings. These live on the helper, not on each effect: they are statements about
 -- who you would infuse, and there is only one answer per player.
 L["WHAT COUNTS AS A STRONG WINDOW"] = true
@@ -2850,6 +2862,17 @@ L["Unticking both removes the strong window signal."] = true
 L["NEVER MARK"] = true
 L["Groups without assigned roles are never excluded."] = true
 L["Hide the helper while Power Infusion is on cooldown"] = true
+-- Only watch. Classes rather than specs because the spell data records a class and nothing
+-- finer; the pointer names the editor that does go spell by spell, so the limit is not a
+-- dead end.
+L["ONLY WATCH"] = true
+L["Untick a class to stop watching its cooldowns. The same list is editable spell by spell in the Filter Designer."] = true
+L["Unticked classes' cooldowns have been taken out of the helper's spell list. The same list is editable spell by spell in the Filter Designer."] = true
+-- Sound. The helper owns this entry outright: the generic effects list refuses to show sound
+-- on a filter-owned record, so it offers no row and no delete button for it either.
+L["SOUND"] = true
+L["Play a sound when a window opens"] = true
+L["Silent while Power Infusion is on cooldown, and never for your own casts."] = true
 -- Row labels. Burst and strong share one spell list on purpose, so without these two the
 -- rows read identically -- distinguishable only by their type badge.
 L["PI Helper — Burst window"] = true
