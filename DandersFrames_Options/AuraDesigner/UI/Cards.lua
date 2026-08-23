@@ -137,6 +137,18 @@ local PIH_SIGNALS = {
     infused = { surface = "background", color = { 0.55, 0.35, 0.95 }, list = "infused"   },
 }
 
+-- ☠ THE BORDER KEEPS ITS COLOUR UNDER A DIFFERENT NAME. DF.Border:BuildSpec reads
+-- `BorderColor`; every other frame-level surface reads plain `color`. Writing `color` on a
+-- border is neither an error nor a warning -- the field sits there unread while the ring paints
+-- the white it was created with. The first pass of this recipe did exactly that and shipped a
+-- burst window that was white instead of gold; found by reading BuildSpec, not by looking at
+-- it, because a white border still looks like a border that works.
+-- ⚠ Derived from the SURFACE rather than stored per signal, so moving a signal to another
+-- surface carries its colour across instead of leaving it behind under a name nothing reads.
+local function pihColorKey(surface)
+    return (surface == "border") and "BorderColor" or "color"
+end
+
 -- Localised at call time, not at file scope: the same locale-timing rule the effect-label
 -- tables in Groups.lua follow.
 local function pihLabel(key)
@@ -328,7 +340,7 @@ local function pihCreateSignal(key)
     -- Its own row label. Burst and strong share one spell list, so without this they read
     -- identically in the effects list.
     cfg.label = pihLabel(key)
-    cfg.color = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
+    cfg[pihColorKey(def.surface)] = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
     -- ⚠ OTHERS ONLY. Twins of the Sun Priestess is near-always taken and copies every Power
     -- Infusion cast back onto the priest, so an any-caster mark would light our own frame
     -- after every cast.
