@@ -189,10 +189,13 @@ function P.PIH_Create(opts)
     -- ⚠ OTHERS ONLY ON ALL OF THEM. Twins of the Sun Priestess is near-always taken and copies
     -- every Power Infusion cast onto the priest, so an any-caster mark would light our own
     -- frame after every cast.
-    local function mk(ref, typeKey, r, g, b, conditions)
+    local function mk(ref, typeKey, label, r, g, b, conditions)
         if not ref then return end
         local cfg = EnsureTypeConfig(ref, typeKey)
         if not cfg then return end
+        -- Its own row label. Burst and strong share one spell list on purpose (one list means
+        -- trimming a spell trims it everywhere), so without this they read identically.
+        cfg.label = label
         cfg.color = { r = r, g = g, b = b, a = 1 }
         cfg.othersOnly = true
         cfg.enabled = true
@@ -200,13 +203,13 @@ function P.PIH_Create(opts)
     end
 
     -- Burst: a cooldown is running. Border, per §5b's default.
-    mk(cdRef, "border", 1.00, 0.82, 0.25)
+    mk(cdRef, "border", L["PI Helper — Burst window"], 1.00, 0.82, 0.25)
 
     -- Strong: a cooldown AND (a potion OR a trinket) -- they are going all in.
     -- One group of cooldowns, one of amplifiers, combined ALL. The union inside a group is
     -- free: "one group is just a plain union" (Factory.lua:501).
     if ampRef then
-        mk(cdRef, "healthbar", 1.00, 0.35, 0.20, {
+        mk(cdRef, "healthbar", L["PI Helper — Strong window"], 1.00, 0.35, 0.20, {
             mode = "ALL",
             groups = { { triggers = { cdRef } }, { triggers = { ampRef } } },
         })
@@ -214,7 +217,7 @@ function P.PIH_Create(opts)
 
     -- Already infused: do not double up. Its own filter so it carries the sentinel and is
     -- gated with the rest -- if our Power Infusion is down we cannot infuse anyone anyway.
-    mk(infRef, "background", 0.55, 0.35, 0.95)
+    mk(infRef, "background", L["PI Helper — Already infused"], 0.55, 0.35, 0.95)
 
     if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
     if DF.UpdateAllFrames then DF:UpdateAllFrames() end
@@ -252,6 +255,63 @@ function P.PIH_Remove()
     local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
     if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
     return true, ("removed %d effect record(s) and their filters"):format(removed)
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- SHARED SETTINGS
+-- ─────────────────────────────────────────────────────────────
+-- ☠ ONE COPY, ON THE HELPER, NOT ON EACH EFFECT. Stored on the Aura Designer config so it
+-- follows the preset, like everything else the helper writes. The engine already treats role
+-- exclusion and the gate spell as a single switch for the whole helper, so per-effect storage
+-- would have been a second source of truth that could disagree with the thing doing the work.
+function P.PIH_Settings()
+    local adDB = GetAuraDesignerDB()
+    if not adDB then return {} end
+    -- ⚠ TANKS AND HEALERS EXCLUDED BY DEFAULT. You infuse damage dealers; marking the healer
+    -- is noise on every pull. The user can untick either.
+    -- gateEnabled: the whole point of the helper, so it defaults ON.
+    adDB.pihelper = adDB.pihelper or
+        { roles = { TANK = true, HEALER = true }, gateEnabled = true }
+    adDB.pihelper.roles = adDB.pihelper.roles or {}
+    return adDB.pihelper
+end
+
+-- Push the shared settings into the running engine. Config alone changes nothing: the gate
+-- reads its own state, so a saved setting that was never pushed is a setting that does not
+-- apply until something else happens to re-derive it.
+function P.PIH_Apply()
+    local s = P.PIH_Settings()
+    if DF.AuraContainer and DF.AuraContainer.SetHelperExcludedRoles then
+        local any = false
+        for _ in pairs(s.roles or {}) do any = true break end
+        DF.AuraContainer.SetHelperExcludedRoles(any and s.roles or nil)
+    end
+    -- Gate off means "never hide": force the gate open and leave it there.
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.PIH_SetGateEnabled then Engine:PIH_SetGateEnabled(s.gateEnabled ~= false) end
+end
+
+function P.PIH_SetRole(role, on)
+    local s = P.PIH_Settings()
+    s.roles[role] = on and true or nil
+    P.PIH_Apply()
+end
+
+-- ☠ CHANGING AN AMPLIFIER REBUILDS. Strong window exists only while at least one is ticked
+-- (see the empty-group trap in PIH_Create), so this is not a value change -- it is the
+-- difference between an effect existing and not existing.
+function P.PIH_SetAmplifier(which, on)
+    local s = P.PIH_Settings()
+    s[which] = on and true or false
+    if P.PIH_Exists() then
+        P.PIH_Remove()
+        P.PIH_Create({ potions = s.potions, trinkets = s.trinkets })
+    end
+end
+
+function P.PIH_SetGateEnabled(on)
+    P.PIH_Settings().gateEnabled = on and true or false
+    P.PIH_Apply()
 end
 
 P.PIH_FILTERS = PIH_FILTERS
@@ -2837,6 +2897,72 @@ S.BuildEffectsTab = function()
         pihBlock:SetPoint("TOPLEFT", 8, yPos)
         pihBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
         yPos = yPos - (pihBlock.layoutHeight + 10)
+
+        -- ── SHARED SETTINGS (only once a helper exists) ──
+        -- ☠ SHARED BEHAVIOUR LIVES HERE, NOT ON EACH EFFECT ROW. The mockup put "Never on",
+        -- "Only watch" and the gating cooldown on every effect. It was drawn before the engine
+        -- existed, and the engine made them ONE switch for the whole helper. Three copies of
+        -- "never on tanks" that can disagree is not flexibility -- it is four states where one
+        -- is meaningful and three are bug reports.
+        -- Appearance (colour, border style, which surface) stays on the effect rows, because
+        -- that genuinely differs per signal and is where the AD already puts appearance.
+        if exists then
+            local cfg = P.PIH_Settings()
+
+            local function pihGroup(header, buildFn)
+                local group = GUI:CreateSettingsGroup(parent, (parent:GetWidth() or 320) - 26)
+                group.padding = 10
+                group:AddWidget(GUI:CreateHeader(parent, header), GUI.RowHeight.sectionHeader)
+                buildFn(group)
+                local h = group:LayoutChildren()
+                group:SetPoint("TOPLEFT", 8, yPos)
+                group:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+                yPos = yPos - (h + 10)
+            end
+
+            pihGroup(L["WHAT COUNTS AS A STRONG WINDOW"], function(g)
+                -- ☠ THESE TWO BRING A SIGNAL INTO EXISTENCE. Strong window is "a cooldown AND
+                -- (a potion OR a trinket)". With neither ticked the amplifier group is empty,
+                -- resolveConditions skips it, bails on fewer than two groups, and the effect
+                -- silently degrades into a duplicate of the burst signal. So the recipe does
+                -- not create it at all until one of these is on -- and ticking one rebuilds.
+                g:AddWidget(GUI:CreateCheckbox(parent, L["Combat potions"], nil, nil, nil,
+                    function() return P.PIH_Settings().potions == true end,
+                    function(v) P.PIH_SetAmplifier("potions", v) end), 24)
+                g:AddWidget(GUI:CreateCheckbox(parent, L["On-use trinkets"], nil, nil, nil,
+                    function() return P.PIH_Settings().trinkets == true end,
+                    function(v) P.PIH_SetAmplifier("trinkets", v) end), 24)
+                g:AddWidget(GUI:CreateLabel(parent,
+                    L["With neither ticked there is no strong window — only the burst signal."]), 26)
+            end)
+
+            pihGroup(L["NEVER MARK"], function(g)
+                -- ⚠ FAILS OPEN. A group with no assigned roles reads as "no role" for everyone
+                -- and nothing is excluded. Marking a tank you did not want is a smaller failure
+                -- than silently hiding the signal on the damage dealers you did.
+                g:AddWidget(GUI:CreateCheckbox(parent, L["Tanks"], nil, nil, nil,
+                    function() return (P.PIH_Settings().roles or {}).TANK == true end,
+                    function(v) P.PIH_SetRole("TANK", v) end), 24)
+                g:AddWidget(GUI:CreateCheckbox(parent, L["Healers"], nil, nil, nil,
+                    function() return (P.PIH_Settings().roles or {}).HEALER == true end,
+                    function(v) P.PIH_SetRole("HEALER", v) end), 24)
+                g:AddWidget(GUI:CreateLabel(parent,
+                    L["Groups without assigned roles are never excluded."]), 26)
+            end)
+
+            pihGroup(L["POWER INFUSION"], function(g)
+                -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
+                -- cooldown gates the helper. The machinery is not priest-specific so it was
+                -- easy -- but nobody asked for it, and "which spell hides this" is a question
+                -- about plumbing rather than about the feature. The helper exists to say who
+                -- is worth infusing; it hides when you cannot infuse. That is one idea, and
+                -- one switch. (The capability stays underneath for testing.)
+                g:AddWidget(GUI:CreateCheckbox(parent,
+                    L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
+                    function() return P.PIH_Settings().gateEnabled ~= false end,
+                    function(v) P.PIH_SetGateEnabled(v) end), 24)
+            end)
+        end
     end
 
     -- ── ACTIVE INDICATORS heading ──

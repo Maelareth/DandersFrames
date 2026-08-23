@@ -329,6 +329,64 @@ end
 
 function Engine:PIH_SetGateOpen(open) return pihSet(not open) end
 
+-- Point the gate at a different cooldown. Called by the settings panel; `/dfpi gate` uses the
+-- same path. ☠ Re-derives immediately: a saved setting that was never pushed is a setting that
+-- does not apply until something else happens to re-derive it.
+function Engine:PIH_SetGateSpell(spellID)
+    spellID = tonumber(spellID)
+    if not spellID then return false end
+    PI_SPELL_ID = spellID
+    local ready = pihReadReady()
+    pihSet(not ready)
+    return true
+end
+
+function Engine:PIH_GetGateSpell() return PI_SPELL_ID end
+
+-- ☠ THE GATE CAN BE SWITCHED OFF ENTIRELY. "Hide while Power Infusion is on cooldown" is the
+-- whole point of the helper, so it defaults on -- but someone who just wants to see burst
+-- windows can turn it off, and then the helper never hides.
+--
+-- Off means FORCE OPEN and stay there: the watcher stops driving, so a cooldown starting or
+-- ending changes nothing. Not "ignore the events" -- the gate is genuinely open, which is what
+-- the setting says.
+local pihGateEnabled = true
+
+function Engine:PIH_SetGateEnabled(on)
+    pihGateEnabled = on and true or false
+    if not pihGateEnabled then
+        pihManual = nil
+        pihSet(false)          -- open, and nothing will shut it
+    else
+        local ready = pihReadReady()
+        pihSet(not ready)      -- resume from the real cooldown state
+    end
+    return pihGateEnabled
+end
+
+function Engine:PIH_IsGateEnabled() return pihGateEnabled end
+
+-- ☠ THE RESIDENT HALF READS THE SAVED SETTINGS ITSELF. The panel that writes them lives in
+-- the load-on-demand options addon, so anything that only applied when the panel was open
+-- would silently not apply to a player who never opens their settings -- which is most of
+-- them, most of the time. §1b's whole point.
+--
+-- Reads the party preset: the helper is per-preset (§2), and a party/raid split sharing one
+-- preset shares the helper, which is the addon's model for every other effect.
+function Engine:PIH_ApplySaved()
+    local adDB = DF.GetModeBaseAuraDesigner and DF:GetModeBaseAuraDesigner("party")
+    local s = adDB and adDB.pihelper
+    if not s then return false end
+
+    if DF.AuraContainer and DF.AuraContainer.SetHelperExcludedRoles then
+        local any = false
+        for _ in pairs(s.roles or {}) do any = true break end
+        DF.AuraContainer.SetHelperExcludedRoles(any and s.roles or nil)
+    end
+    Engine:PIH_SetGateEnabled(s.gateEnabled ~= false)
+    return true
+end
+
 
 -- ☠ SHUT ON THE CAST, OPEN ON THE COOLDOWN CLEARING.
 -- §4b originally specified "read isActive, edge-detect, done" and explicitly REJECTED watching
@@ -345,6 +403,7 @@ pihWatcher:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 pihWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
 pihWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
+    if not pihGateEnabled then return end   -- switched off: nothing shuts or opens it
     if pihManual ~= nil then return end
 
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
@@ -357,6 +416,7 @@ pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
     end
 
     if event == "PLAYER_ENTERING_WORLD" then
+        Engine:PIH_ApplySaved()   -- saved settings, before any gate decision
         -- ☠ THE ONE PLACE isActive MAY SHUT THE GATE. On load we never saw the cast, so a
         -- reload mid-cooldown would otherwise leave the helper showing for the rest of it.
         -- Safe here specifically because nothing is being cast at this instant, so a true
