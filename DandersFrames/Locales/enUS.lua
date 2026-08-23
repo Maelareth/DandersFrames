@@ -2831,16 +2831,24 @@ L["POWER INFUSION HELPER"] = true
 L["Add the helper"] = true
 L["Remove the helper"] = true
 L["Marks who is worth infusing, and goes dark while your Power Infusion is on cooldown."] = true
-L["Deletes its effects and its spell lists. Nothing else is touched."] = true
+L["Deletes its indicators and its spell lists. Nothing else is touched."] = true
+-- The three signals. Adding the helper turns on the first one only; the other two are ticked
+-- on afterwards, so each label has to stand alone with just the line beneath it for context.
+L["WHAT TO MARK"] = true
+L["Burst window"] = true
+L["Someone in your group used a big cooldown."] = true
+L["Strong window"] = true
+L["A big cooldown and a potion or trinket — they are going all in."] = true
+L["Already infused"] = true
+L["They already have Power Infusion — do not double up."] = true
 -- Shared settings. These live on the helper, not on each effect: they are statements about
 -- who you would infuse, and there is only one answer per player.
 L["WHAT COUNTS AS A STRONG WINDOW"] = true
 L["Combat potions"] = true
 L["On-use trinkets"] = true
-L["With neither ticked there is no strong window — only the burst signal."] = true
+L["Unticking both removes the strong window signal."] = true
 L["NEVER MARK"] = true
 L["Groups without assigned roles are never excluded."] = true
-L["POWER INFUSION"] = true
 L["Hide the helper while Power Infusion is on cooldown"] = true
 -- Row labels. Burst and strong share one spell list on purpose, so without these two the
 -- rows read identically -- distinguishable only by their type badge.

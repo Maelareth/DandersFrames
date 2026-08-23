@@ -76,16 +76,32 @@ local BuildTypeContent = P.BuildTypeContent
 -- ============================================================
 -- POWER INFUSION HELPER -- THE RECIPE (slice 3a)
 -- ============================================================
--- One click builds the whole helper; one click takes it apart. Create and remove live
--- together deliberately: the thing that knows what the helper owns is the thing that knows
--- how to dismantle it, and building them apart means working that out twice.
+-- One click adds the helper with ONE signal running -- the burst window. The other two are
+-- ticked on afterwards if the user wants them. One click removes the lot.
 --
--- It writes nothing new in kind. Ordinary custom filters, ordinary frame-level effects with
--- ordinary condition groups -- the same shapes the From a Filter picker produces by hand.
--- The only thing that makes them OURS is the sentinel id seeded into the filters.
+-- ☠ THE EFFECTS ARE THE RECORD. There is no second copy of "which signals are on" kept in
+-- settings and reconciled against what is on screen. Each effect carries a mark saying which
+-- signal it is, and every question is answered by looking for the mark: is a helper added, is
+-- strong window on, which surface is burst using. One truth, so nothing can drift out of step
+-- with it -- and deleting a helper row by hand from Active Indicators simply unticks that
+-- signal, because nothing is left holding a contrary opinion.
 --
--- ☠ THE SENTINEL IS NOT OPTIONAL. Without it nothing the recipe creates is gated, and every
--- one of slices 1-2 applies to nothing the user can actually add.
+-- ⚠ WHICH IS WHY REMOVING FORGETS THE COLOURS, and that is the house rule rather than a gap.
+-- The Aura Designer keeps a record's settings when its last effect is deleted ONLY for a spell
+-- the user picked into the pool themselves; records the addon built for them -- ad-hoc ones,
+-- and anything driven by a spell list, which is what the helper uses -- are pruned on the spot.
+-- S.CleanupAdHocAura says why: an entry holding nothing is cruft in the profile. Remembering
+-- would be an exception carved out of a rule written for exactly this category.
+-- Behaviour settings (never-mark, the amplifiers, the gate) are NOT effects, live where every
+-- other setting in the addon lives, and persist as they always did. Appearance dies with the
+-- effect it belongs to. That line is drawn once and holds in both directions.
+--
+-- It writes nothing new in kind: ordinary custom filters, ordinary frame-level effects with
+-- ordinary condition groups -- the shapes the From a Filter picker produces by hand.
+--
+-- ☠ THE SENTINEL IS NOT OPTIONAL. It is what makes an effect OURS to the gate. Without it,
+-- nothing the recipe creates is gated, and every one of slices 1-2 applies to nothing the user
+-- can actually add.
 -- ============================================================
 
 local PIH_FILTERS = {
@@ -98,11 +114,36 @@ local PIH_PI_SPELL_ID = 10060   -- Power Infusion, for the "already infused" mar
 
 -- Seeded from the curated sets, confirmed present in SpellDB:
 --   offensiveCooldowns (45)  racials (13)  consumables (6, the potions)  trinketsItems (41)
--- ⚠ Amplifiers are BOTH opt-in. Neither is seeded; see the empty-group trap below.
 local PIH_SEED = {
     cooldowns  = { "offensiveCooldowns", "racials" },
     amplifiers = { potions = "consumables", trinkets = "trinketsItems" },
 }
+
+-- The three signals, in the order they read on the panel.
+--
+-- ⚠ `surface` is the DEFAULT ONLY. The surface a signal actually occupies is wherever its
+-- mark is found, so moving one (3b's dropdowns) needs no stored field and no conversion of
+-- anyone's saved settings -- the effect moves and the mark moves with it.
+--
+-- ☠ BURST AND STRONG SHARE ONE RECORD, because they share one spell list on purpose: trimming
+-- a spell should trim it for both. A record holds one effect per surface, so those two cannot
+-- merely CLASH on a surface -- the second would overwrite the first and a signal would vanish.
+-- pihCreateSignal refuses that rather than letting it happen quietly, and 3b's dropdown must
+-- grey a taken surface out rather than warn about it.
+local PIH_SIGNAL_ORDER = { "burst", "strong", "infused" }
+local PIH_SIGNALS = {
+    burst   = { surface = "border",     color = { 1.00, 0.82, 0.25 }, list = "cooldowns" },
+    strong  = { surface = "healthbar",  color = { 1.00, 0.35, 0.20 }, list = "cooldowns" },
+    infused = { surface = "background", color = { 0.55, 0.35, 0.95 }, list = "infused"   },
+}
+
+-- Localised at call time, not at file scope: the same locale-timing rule the effect-label
+-- tables in Groups.lua follow.
+local function pihLabel(key)
+    if key == "burst"   then return L["PI Helper — Burst window"]    end
+    if key == "strong"  then return L["PI Helper — Strong window"]   end
+    if key == "infused" then return L["PI Helper — Already infused"] end
+end
 
 local function pihSentinel()
     return DF.AuraContainer and DF.AuraContainer.GetHelperSentinel
@@ -121,11 +162,17 @@ end
 
 -- Create-or-find, then seed. Idempotent: AddSpellToCustom answers "exists" for a duplicate,
 -- so re-running the recipe repairs rather than doubles.
-local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel)
+-- `wipeFirst` empties the list before re-seeding, which is how the amplifier list is rewritten
+-- in place -- see pihSyncAmplifierFilter for why it must keep its id.
+local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel, wipeFirst)
     local R = DF.FilterRegistry
     if not (R and R.CreateCustomFilter) then return nil end
     local id = pihFilterIdByName(name) or R:CreateCustomFilter(name)
     if not id then return nil end
+    if wipeFirst then
+        local f = R:GetCustomFilter(id)
+        if f then f.spells, f.rawIDs = {}, {} end
+    end
     for _, catKey in ipairs(presetKeys or {}) do
         local recs = R.ByCategory and R.ByCategory[catKey]
         for _, rec in ipairs(recs or {}) do R:AddSpellToCustom(id, rec.id) end
@@ -138,123 +185,36 @@ local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel)
     return id
 end
 
--- Is a helper configured on the CURRENT preset? Keyed on the burst effect existing, because
--- that is the one signal that always exists when a helper does.
-local function pihBurstRef()
-    local id = pihFilterIdByName(PIH_FILTERS.cooldowns)
-    return id and DF:MakeADFilterRef("custom", id) or nil
+-- ─────────────────────────────────────────────────────────────
+-- WHAT EXISTS -- read off the marks, never off a stored list
+-- ─────────────────────────────────────────────────────────────
+-- Scans the WHOLE pool rather than the helper's own records. If a spell list is renamed or
+-- deleted underneath us, our effects must still be findable -- otherwise they become orphans
+-- that render nothing and that no control can reach.
+local function pihFound()
+    local out = {}
+    local pool = CurrentAuraPool()
+    if type(pool) ~= "table" then return out end
+    local keys = P.FRAME_LEVEL_TYPE_KEYS or {}
+    for auraName, auraCfg in pairs(pool) do
+        if type(auraCfg) == "table" then
+            for _, typeKey in ipairs(keys) do
+                local cfg = auraCfg[typeKey]
+                if type(cfg) == "table" and cfg.pihSignal then
+                    out[cfg.pihSignal] = { auraName = auraName, typeKey = typeKey, cfg = cfg }
+                end
+            end
+        end
+    end
+    return out
 end
 
 function P.PIH_Exists()
-    local ref = pihBurstRef()
-    if not ref then return false end
-    local pool = CurrentAuraPool()
-    local cfg = pool and pool[ref]
-    return (type(cfg) == "table" and cfg.border ~= nil) and true or false
+    return next(pihFound()) ~= nil
 end
 
--- ─────────────────────────────────────────────────────────────
--- CREATE
--- ─────────────────────────────────────────────────────────────
--- opts.potions / opts.trinkets -- the two opt-in amplifier sets.
-function P.PIH_Create(opts)
-    opts = opts or {}
-    local pool = CurrentAuraPool()
-    if not pool then return false, "no aura pool on this preset" end
-
-    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, nil, true)
-    if not cdId then return false, "could not create the cooldown filter" end
-    local cdRef = DF:MakeADFilterRef("custom", cdId)
-
-    -- ☠ THE EMPTY-AMPLIFIER TRAP. resolveConditions SKIPS an empty group and then bails on
-    -- fewer than two groups -- at which point the effect falls back to a PLAIN UNION and the
-    -- strong-window signal silently becomes an exact duplicate of burst window: same trigger,
-    -- same behaviour, two effects contending for surfaces over nothing.
-    -- So with no amplifier opted in, strong window is not created at all. That is the honest
-    -- state: the signal has nothing to distinguish, so it should not exist.
-    local ampPresets = {}
-    if opts.potions  then ampPresets[#ampPresets + 1] = PIH_SEED.amplifiers.potions  end
-    if opts.trinkets then ampPresets[#ampPresets + 1] = PIH_SEED.amplifiers.trinkets end
-    local ampRef
-    if #ampPresets > 0 then
-        -- No sentinel: this filter is only ever a condition TRIGGER, never an effect's own
-        -- identity, so it is never the map the gate inspects.
-        local ampId = pihEnsureFilter(PIH_FILTERS.amplifiers, ampPresets, nil, false)
-        ampRef = ampId and DF:MakeADFilterRef("custom", ampId) or nil
-    end
-
-    local infId  = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID }, true)
-    local infRef = infId and DF:MakeADFilterRef("custom", infId) or nil
-
-    -- ⚠ OTHERS ONLY ON ALL OF THEM. Twins of the Sun Priestess is near-always taken and copies
-    -- every Power Infusion cast onto the priest, so an any-caster mark would light our own
-    -- frame after every cast.
-    local function mk(ref, typeKey, label, r, g, b, conditions)
-        if not ref then return end
-        local cfg = EnsureTypeConfig(ref, typeKey)
-        if not cfg then return end
-        -- Its own row label. Burst and strong share one spell list on purpose (one list means
-        -- trimming a spell trims it everywhere), so without this they read identically.
-        cfg.label = label
-        cfg.color = { r = r, g = g, b = b, a = 1 }
-        cfg.othersOnly = true
-        cfg.enabled = true
-        if conditions then cfg.conditions = conditions end
-    end
-
-    -- Burst: a cooldown is running. Border, per §5b's default.
-    mk(cdRef, "border", L["PI Helper — Burst window"], 1.00, 0.82, 0.25)
-
-    -- Strong: a cooldown AND (a potion OR a trinket) -- they are going all in.
-    -- One group of cooldowns, one of amplifiers, combined ALL. The union inside a group is
-    -- free: "one group is just a plain union" (Factory.lua:501).
-    if ampRef then
-        mk(cdRef, "healthbar", L["PI Helper — Strong window"], 1.00, 0.35, 0.20, {
-            mode = "ALL",
-            groups = { { triggers = { cdRef } }, { triggers = { ampRef } } },
-        })
-    end
-
-    -- Already infused: do not double up. Its own filter so it carries the sentinel and is
-    -- gated with the rest -- if our Power Infusion is down we cannot infuse anyone anyway.
-    mk(infRef, "background", L["PI Helper — Already infused"], 0.55, 0.35, 0.95)
-
-    if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
-    if DF.UpdateAllFrames then DF:UpdateAllFrames() end
-    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
-    if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
-    return true, ampRef and "created" or "created (no amplifiers: strong window omitted)"
-end
-
--- ─────────────────────────────────────────────────────────────
--- REMOVE
--- ─────────────────────────────────────────────────────────────
--- ☠ CLEARS `sound` EXPLICITLY. The generic effects list hides sound on a filter-owned record
--- (Groups.lua:1381), so it never offers a delete button for it -- an entry we wrote and only
--- we can remove. Everything the recipe writes, the teardown clears.
-function P.PIH_Remove()
-    local pool = CurrentAuraPool()
-    if not pool then return false, "no aura pool on this preset" end
-    local R = DF.FilterRegistry
-
-    local removed = 0
-    for _, name in pairs(PIH_FILTERS) do
-        local id = pihFilterIdByName(name)
-        if id then
-            local ref = DF:MakeADFilterRef("custom", id)
-            if ref and pool[ref] then
-                pool[ref] = nil          -- every effect on this ref, sound included
-                removed = removed + 1
-            end
-            if R and R.DeleteCustomFilter then R:DeleteCustomFilter(id) end
-        end
-    end
-
-    if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
-    if DF.UpdateAllFrames then DF:UpdateAllFrames() end
-    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
-    if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
-    return true, ("removed %d effect record(s) and their filters"):format(removed)
+function P.PIH_SignalOn(key)
+    return pihFound()[key] ~= nil
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -262,8 +222,8 @@ end
 -- ─────────────────────────────────────────────────────────────
 -- ☠ ONE COPY, ON THE HELPER, NOT ON EACH EFFECT. Stored on the Aura Designer config so it
 -- follows the preset, like everything else the helper writes. The engine already treats role
--- exclusion and the gate spell as a single switch for the whole helper, so per-effect storage
--- would have been a second source of truth that could disagree with the thing doing the work.
+-- exclusion and the gate as a single switch for the whole helper, so per-effect storage would
+-- have been a second source of truth that could disagree with the thing doing the work.
 function P.PIH_Settings()
     local adDB = GetAuraDesignerDB()
     if not adDB then return {} end
@@ -291,21 +251,184 @@ function P.PIH_Apply()
     if Engine and Engine.PIH_SetGateEnabled then Engine:PIH_SetGateEnabled(s.gateEnabled ~= false) end
 end
 
+-- ─────────────────────────────────────────────────────────────
+-- BUILDING AND UNBUILDING ONE SIGNAL
+-- ─────────────────────────────────────────────────────────────
+local function pihRefresh()
+    if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
+    if DF.UpdateAllFrames then DF:UpdateAllFrames() end
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
+end
+
+-- ☠ THE AMPLIFIER LIST KEEPS ITS ID ACROSS A CHANGE. Strong window's conditions name this
+-- list by reference, so deleting and re-creating it would leave those conditions pointing at a
+-- list that no longer exists -- a signal that quietly stops firing and reads as a bug in the
+-- gate. The contents are rewritten in place instead.
+local function pihSyncAmplifierFilter(s)
+    local presets = {}
+    if s.potions  then presets[#presets + 1] = PIH_SEED.amplifiers.potions  end
+    if s.trinkets then presets[#presets + 1] = PIH_SEED.amplifiers.trinkets end
+    if #presets == 0 then return nil end
+    -- No sentinel: this list is only ever a condition TRIGGER, never an effect's own identity,
+    -- so it is never the map the gate inspects.
+    return pihEnsureFilter(PIH_FILTERS.amplifiers, presets, nil, false, true)
+end
+
+local function pihCreateSignal(key)
+    local def = PIH_SIGNALS[key]
+    if not def then return false, "no such signal" end
+    if pihFound()[key] then return true, "already on" end
+
+    local s = P.PIH_Settings()
+
+    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, nil, true)
+    if not cdId then return false, "could not build the cooldown list" end
+    local cdRef = DF:MakeADFilterRef("custom", cdId)
+    if not cdRef then return false, "could not name the cooldown list" end
+
+    local ref = cdRef
+    if def.list == "infused" then
+        local infId = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID }, true)
+        if not infId then return false, "could not build the infused list" end
+        ref = DF:MakeADFilterRef("custom", infId)
+        if not ref then return false, "could not name the infused list" end
+    end
+
+    local conditions
+    if key == "strong" then
+        -- ☠ THE EMPTY-AMPLIFIER TRAP. resolveConditions SKIPS an empty group and then bails on
+        -- fewer than two groups -- at which point the effect falls back to a PLAIN UNION and
+        -- strong window silently becomes an exact duplicate of burst window: same trigger, same
+        -- behaviour, two effects contending for a surface over nothing.
+        -- So with no amplifier ticked, strong window is not created at all. That is the honest
+        -- state: the signal has nothing left to distinguish, so it should not exist.
+        local ampId = pihSyncAmplifierFilter(s)
+        if not ampId then return false, "strong window needs a potion or a trinket ticked" end
+        local ampRef = DF:MakeADFilterRef("custom", ampId)
+        if not ampRef then return false, "could not name the amplifier list" end
+        -- A cooldown AND (a potion OR a trinket). One group of each, combined ALL -- the union
+        -- inside a group is free: "one group is just a plain union" (Factory.lua:501).
+        conditions = { mode = "ALL", groups = { { triggers = { cdRef } }, { triggers = { ampRef } } } }
+    end
+
+    -- ⚠ REFUSE A SURFACE ANOTHER SIGNAL IS SITTING ON. Two effects cannot share one surface on
+    -- one record: the second simply replaces the first. Unreachable on the defaults; the guard
+    -- is here for 3b, where the user can move a signal.
+    local pool = CurrentAuraPool()
+    local occupant = pool and pool[ref] and pool[ref][def.surface]
+    if type(occupant) == "table" and occupant.pihSignal and occupant.pihSignal ~= key then
+        return false, "that surface is already taken by another signal"
+    end
+
+    local cfg = EnsureTypeConfig(ref, def.surface)
+    if not cfg then return false, "could not create the effect" end
+    -- ☠ THE MARK. This one field is what makes every question above answerable.
+    cfg.pihSignal = key
+    -- Its own row label. Burst and strong share one spell list, so without this they read
+    -- identically in the effects list.
+    cfg.label = pihLabel(key)
+    cfg.color = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
+    -- ⚠ OTHERS ONLY. Twins of the Sun Priestess is near-always taken and copies every Power
+    -- Infusion cast back onto the priest, so an any-caster mark would light our own frame
+    -- after every cast.
+    cfg.othersOnly = true
+    cfg.enabled = true
+    cfg.conditions = conditions   -- nil on purpose for the unchained signals: clears a stale chain
+    return true
+end
+
+local function pihDeleteSignal(key)
+    local hit = pihFound()[key]
+    if not hit then return false end
+    local pool = CurrentAuraPool()
+    local auraCfg = pool and pool[hit.auraName]
+    if auraCfg then auraCfg[hit.typeKey] = nil end
+    -- Drops the record once its last effect is gone -- the same prune the generic delete button
+    -- runs, so unticking here and deleting the row there leave the profile identical.
+    if S.CleanupAdHocAura then S.CleanupAdHocAura(hit.auraName) end
+    return true
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- ADD / REMOVE / TICK
+-- ─────────────────────────────────────────────────────────────
+-- ⚠ ADDING TURNS ON ONE SIGNAL. Not everything it could build: a click that produces three
+-- indicators the user did not choose is a click that has decided for them, and two of the three
+-- are situational. Burst window is the one that is always worth having.
+function P.PIH_Create()
+    local ok, why = pihCreateSignal("burst")
+    if ok then pihRefresh() end
+    return ok, why
+end
+
+function P.PIH_Remove()
+    local pool = CurrentAuraPool()
+    local found = pihFound()
+    local names, n = {}, 0
+    for _, hit in pairs(found) do names[hit.auraName] = true; n = n + 1 end
+
+    -- ☠ THE WHOLE RECORD GOES, not only the marked surfaces. A helper record can carry a
+    -- `sound` entry that the generic effects list refuses to show on a filter-owned record
+    -- (Groups.lua) -- so it offers no delete button for it, and anything left behind there is
+    -- unreachable. Safe to take wholesale: a record here is identified BY a helper spell list,
+    -- so nothing of the user's own can be sitting on it.
+    if pool then
+        for name in pairs(names) do pool[name] = nil end
+    end
+
+    -- The lists go too. They exist only to feed these effects, and three "Power Infusion
+    -- Helper" entries left in the filter list after the helper is gone are cruft only their
+    -- author could explain.
+    local R = DF.FilterRegistry
+    for _, name in pairs(PIH_FILTERS) do
+        local id = pihFilterIdByName(name)
+        if id and R and R.DeleteCustomFilter then R:DeleteCustomFilter(id) end
+    end
+
+    pihRefresh()
+    return true, ("removed %d signal(s) and their spell lists"):format(n)
+end
+
+function P.PIH_SetSignal(key, on)
+    local s = P.PIH_Settings()
+    if on then
+        -- ☠ STRONG WINDOW BRINGS ITS AMPLIFIERS WITH IT. It means "a cooldown AND something
+        -- extra"; with no amplifier ticked there is no extra, and the signal would be created
+        -- as a duplicate of burst or not at all. Ticking it with neither on turns both on, so
+        -- the tick does what it says on the first click rather than appearing to do nothing.
+        if key == "strong" and not (s.potions or s.trinkets) then
+            s.potions, s.trinkets = true, true
+        end
+        pihCreateSignal(key)
+    else
+        pihDeleteSignal(key)
+    end
+    pihRefresh()
+end
+
 function P.PIH_SetRole(role, on)
     local s = P.PIH_Settings()
+    -- PIH_Settings hands back a bare table when there is no Aura Designer config to write to,
+    -- and indexing a field that table does not have is an error rather than a no-op.
+    s.roles = s.roles or {}
     s.roles[role] = on and true or nil
     P.PIH_Apply()
 end
 
--- ☠ CHANGING AN AMPLIFIER REBUILDS. Strong window exists only while at least one is ticked
--- (see the empty-group trap in PIH_Create), so this is not a value change -- it is the
--- difference between an effect existing and not existing.
+-- ☠ UNTICKING THE LAST AMPLIFIER TAKES STRONG WINDOW WITH IT -- see the empty-amplifier trap in
+-- pihCreateSignal. This is not a value change; it is the difference between a signal existing
+-- and not existing.
 function P.PIH_SetAmplifier(which, on)
     local s = P.PIH_Settings()
     s[which] = on and true or false
-    if P.PIH_Exists() then
-        P.PIH_Remove()
-        P.PIH_Create({ potions = s.potions, trinkets = s.trinkets })
+    if P.PIH_SignalOn("strong") then
+        if not (s.potions or s.trinkets) then
+            pihDeleteSignal("strong")
+        else
+            pihSyncAmplifierFilter(s)   -- rewritten in place, so the effect keeps pointing at it
+        end
+        pihRefresh()
     end
 end
 
@@ -315,6 +438,7 @@ function P.PIH_SetGateEnabled(on)
 end
 
 P.PIH_FILTERS = PIH_FILTERS
+P.PIH_SIGNAL_ORDER = PIH_SIGNAL_ORDER
 
 -- ============================================================
 -- GLOBAL VIEW (used by Global tab)
@@ -2867,7 +2991,11 @@ S.BuildEffectsTab = function()
     --
     -- ☠ The card becomes REMOVE once a helper exists on this preset, so there is one place to
     -- look for both. Create and remove are the same feature seen from either side.
-    if select(2, UnitClass("player")) == "PRIEST" then
+    --
+    -- ⚠ NOT ON THE DEBUFFS TAB. It has no aura pool -- CurrentAuraPool returns the shared empty
+    -- table there while writes still land in the buff pool, so the card would read "add" over a
+    -- helper that already exists and build a second one on the next click.
+    if select(2, UnitClass("player")) == "PRIEST" and S.activeBuffTab ~= "debuffs" then
         local exists = P.PIH_Exists()
         local pihBlock = GUI:CreateChoiceCardGroup(parent, {
             title    = L["POWER INFUSION HELPER"],
@@ -2877,18 +3005,11 @@ S.BuildEffectsTab = function()
                 {
                     title = exists and L["Remove the helper"] or L["Add the helper"],
                     desc  = exists
-                        and L["Deletes its effects and its spell lists. Nothing else is touched."]
+                        and L["Deletes its indicators and its spell lists. Nothing else is touched."]
                         or  L["Marks who is worth infusing, and goes dark while your Power Infusion is on cooldown."],
                     art   = { kind = "border", color = { 1.00, 0.82, 0.25 } },
                     onClick = function()
-                        if P.PIH_Exists() then
-                            P.PIH_Remove()
-                        else
-                            -- ⚠ Amplifiers are BOTH opt-in and neither is on by default, so
-                            -- the strong-window signal is not created yet. 3b's panel gives
-                            -- them real controls; until then this is the honest default.
-                            P.PIH_Create({ potions = false, trinkets = false })
-                        end
+                        if P.PIH_Exists() then P.PIH_Remove() else P.PIH_Create() end
                         S.SwitchTab("effects")
                     end,
                 },
@@ -2898,17 +3019,20 @@ S.BuildEffectsTab = function()
         pihBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
         yPos = yPos - (pihBlock.layoutHeight + 10)
 
-        -- ── SHARED SETTINGS (only once a helper exists) ──
-        -- ☠ SHARED BEHAVIOUR LIVES HERE, NOT ON EACH EFFECT ROW. The mockup put "Never on",
+        -- ── THE SETTINGS, FOLDED WITH THE CARD ──
+        -- ☠ GATED ON pihBlock.expanded, NOT ONLY ON THE HELPER EXISTING. The card group carries
+        -- its own collapsing header and publishes whether it is open; without asking, folding
+        -- the header away would hide the card and leave its settings stranded below a closed
+        -- section, attached to nothing visible. One header, the whole helper.
+        --
+        -- ☠ SHARED BEHAVIOUR LIVES HERE, NOT ON EACH EFFECT ROW. The mockup put "Never mark",
         -- "Only watch" and the gating cooldown on every effect. It was drawn before the engine
         -- existed, and the engine made them ONE switch for the whole helper. Three copies of
         -- "never on tanks" that can disagree is not flexibility -- it is four states where one
         -- is meaningful and three are bug reports.
         -- Appearance (colour, border style, which surface) stays on the effect rows, because
         -- that genuinely differs per signal and is where the AD already puts appearance.
-        if exists then
-            local cfg = P.PIH_Settings()
-
+        if exists and pihBlock.expanded then
             local function pihGroup(header, buildFn)
                 local group = GUI:CreateSettingsGroup(parent, (parent:GetWidth() or 320) - 26)
                 group.padding = 10
@@ -2920,21 +3044,64 @@ S.BuildEffectsTab = function()
                 yPos = yPos - (h + 10)
             end
 
-            pihGroup(L["WHAT COUNTS AS A STRONG WINDOW"], function(g)
-                -- ☠ THESE TWO BRING A SIGNAL INTO EXISTENCE. Strong window is "a cooldown AND
-                -- (a potion OR a trinket)". With neither ticked the amplifier group is empty,
-                -- resolveConditions skips it, bails on fewer than two groups, and the effect
-                -- silently degrades into a duplicate of the burst signal. So the recipe does
-                -- not create it at all until one of these is on -- and ticking one rebuilds.
-                g:AddWidget(GUI:CreateCheckbox(parent, L["Combat potions"], nil, nil, nil,
-                    function() return P.PIH_Settings().potions == true end,
-                    function(v) P.PIH_SetAmplifier("potions", v) end), 24)
-                g:AddWidget(GUI:CreateCheckbox(parent, L["On-use trinkets"], nil, nil, nil,
-                    function() return P.PIH_Settings().trinkets == true end,
-                    function(v) P.PIH_SetAmplifier("trinkets", v) end), 24)
-                g:AddWidget(GUI:CreateLabel(parent,
-                    L["With neither ticked there is no strong window — only the burst signal."]), 26)
+            -- Each tick creates or deletes one ordinary effect, which is why the rows below
+            -- also appear in Active Indicators: they ARE indicators, and hiding them there
+            -- would mean a row you can see the colour of but cannot find.
+            local function signalRow(g, key, label, desc)
+                g:AddWidget(GUI:CreateCheckbox(parent, label, nil, nil, nil,
+                    function() return P.PIH_SignalOn(key) end,
+                    function(v)
+                        P.PIH_SetSignal(key, v)
+                        S.SwitchTab("effects")   -- the dependent groups appear and vanish with it
+                    end), 24)
+                g:AddWidget(GUI:CreateLabel(parent, desc), 26)
+            end
+
+            pihGroup(L["WHAT TO MARK"], function(g)
+                signalRow(g, "burst", L["Burst window"],
+                    L["Someone in your group used a big cooldown."])
+                signalRow(g, "strong", L["Strong window"],
+                    L["A big cooldown and a potion or trinket — they are going all in."])
+                signalRow(g, "infused", L["Already infused"],
+                    L["They already have Power Infusion — do not double up."])
+
+                -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
+                -- cooldown gates the helper. The machinery is not priest-specific so it was
+                -- easy -- but nobody asked for it, and "which spell hides this" is a question
+                -- about plumbing rather than about the feature. The helper exists to say who is
+                -- worth infusing; it hides when you cannot infuse. One idea, one switch.
+                -- (The capability stays underneath for testing.)
+                --
+                -- ⚠ IT SITS HERE RATHER THAN IN A BOX OF ITS OWN. A whole titled group around a
+                -- single checkbox is more chrome than the setting is worth, and this label says
+                -- what it does without a header to lean on -- which is the test for whether a
+                -- control can live under a heading that does not quite describe it.
+                g:AddWidget(GUI:CreateCheckbox(parent,
+                    L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
+                    function() return P.PIH_Settings().gateEnabled ~= false end,
+                    function(v) P.PIH_SetGateEnabled(v) end), 24)
             end)
+
+            -- ☠ ONLY WHILE STRONG WINDOW IS ON. These two are what the signal MEANS, so on
+            -- their own they are a question about nothing. Shown rather than greyed, because a
+            -- greyed pair would invite the reading that strong window works without them.
+            if P.PIH_SignalOn("strong") then
+                pihGroup(L["WHAT COUNTS AS A STRONG WINDOW"], function(g)
+                    -- ☠ UNTICKING BOTH TAKES THE SIGNAL WITH IT. Strong window is "a cooldown
+                    -- AND (a potion OR a trinket)". With neither ticked the amplifier group is
+                    -- empty, resolveConditions skips it, bails on fewer than two groups, and the
+                    -- effect silently degrades into a duplicate of the burst signal. So the
+                    -- recipe deletes it instead, and ticking one back brings it into existence.
+                    g:AddWidget(GUI:CreateCheckbox(parent, L["Combat potions"], nil, nil, nil,
+                        function() return P.PIH_Settings().potions == true end,
+                        function(v) P.PIH_SetAmplifier("potions", v); S.SwitchTab("effects") end), 24)
+                    g:AddWidget(GUI:CreateCheckbox(parent, L["On-use trinkets"], nil, nil, nil,
+                        function() return P.PIH_Settings().trinkets == true end,
+                        function(v) P.PIH_SetAmplifier("trinkets", v); S.SwitchTab("effects") end), 24)
+                    g:AddWidget(GUI:CreateLabel(parent,
+                        L["Unticking both removes the strong window signal."]), 26)
+                end)
+            end
 
             pihGroup(L["NEVER MARK"], function(g)
                 -- ⚠ FAILS OPEN. A group with no assigned roles reads as "no role" for everyone
@@ -2950,18 +3117,6 @@ S.BuildEffectsTab = function()
                     L["Groups without assigned roles are never excluded."]), 26)
             end)
 
-            pihGroup(L["POWER INFUSION"], function(g)
-                -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
-                -- cooldown gates the helper. The machinery is not priest-specific so it was
-                -- easy -- but nobody asked for it, and "which spell hides this" is a question
-                -- about plumbing rather than about the feature. The helper exists to say who
-                -- is worth infusing; it hides when you cannot infuse. That is one idea, and
-                -- one switch. (The capability stays underneath for testing.)
-                g:AddWidget(GUI:CreateCheckbox(parent,
-                    L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
-                    function() return P.PIH_Settings().gateEnabled ~= false end,
-                    function(v) P.PIH_SetGateEnabled(v) end), 24)
-            end)
         end
     end
 
