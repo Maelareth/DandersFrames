@@ -144,7 +144,12 @@ local PI_SPELL_ID = 10060       -- Power Infusion
 -- GROUP-WIDE (one cast covers everyone, leaving no fresh target) and 1h long (cannot wait for
 -- it to drop). A test buff must be re-triggerable at will -- check duration, target scope and
 -- re-castability before choosing one.
-local PIH_WATCH_ID = 17
+local PIH_WATCH_ID = 21562      -- Power Word: Fortitude. PERMANENT and group-wide, which is
+                                -- right for VISUAL tests (the border must survive a 2-minute
+                                -- cooldown wait) and wrong for SOUND tests (needs fresh
+                                -- applications). Shield (17) is the inverse. ⚠ The right test
+                                -- spell depends on what is being measured -- got this wrong in
+                                -- both directions on this feature.
 
 local pihGateOpen = true        -- true = show (gate spell ready), false = dark (on cooldown)
 
@@ -258,6 +263,43 @@ end
 -- what any container is carrying, and the two are allowed to differ -- a rebuild restores the
 -- live map in config while this still reads "dark". An early return made `/dfpi off` decline
 -- to act while the border was lit.
+-- ☠☠ NOTHING FIRES WHEN A COOLDOWN QUIETLY EXPIRES. `SPELL_UPDATE_COOLDOWN` fires when
+-- cooldowns START or change, not when one runs out on its own. Watched 2026-08-23: the gate
+-- shut on a Dispersion cast, Dispersion's cooldown ended, and the border stayed dark until the
+-- player cast something unrelated -- which fired the event as a side effect of the GCD.
+--
+-- Earlier tests hid this because the player was casting throughout, so the reopen always had
+-- an event to ride on. It is the exact mirror of the GCD bug above: that was an event firing
+-- when it should not matter, this is no event firing when it should.
+--
+-- So while the gate is DARK we poll. Only while dark, one boolean read per tick, and it stops
+-- itself the moment the spell is ready -- so the cost is a couple of reads per second during a
+-- cooldown and nothing at all the rest of the time.
+-- Reads ONE field. `isActive` is plain in combat; startTime / duration / modRate all seal, so
+-- nothing here compares a secret and nothing can throw on one.
+--
+-- ☠☠ BUT `isActive` CANNOT TELL A REAL COOLDOWN FROM THE GLOBAL COOLDOWN. Casting ANY spell
+-- makes EVERY spell report active for the duration of the GCD. Watched 2026-08-23: with the
+-- gate pointed at Dispersion, casting Power Word: Shield made Dispersion read unready and the
+-- gate shut. With Power Infusion the flaw is masked -- its cooldown is minutes long, so the
+-- GCD flicker hides inside a real cooldown -- but it is still there: every spell the player
+-- casts would blink the helper off for a moment.
+--
+-- ⇒ SO THIS IS ONLY EVER USED FOR "IS IT READY AGAIN", NEVER FOR "HAS IT JUST GONE DOWN".
+-- Opening on `not isActive` is safe: the GCD lapsing and the real cooldown ending both mean
+-- genuinely ready. Shutting is driven by the CAST instead -- see the watcher below.
+local function pihReadReady()
+    local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(PI_SPELL_ID)
+    if not info then return true end
+    return info.isActive ~= true
+end
+
+local pihReadyTicker
+
+local function pihStopTicker()
+    if pihReadyTicker then pihReadyTicker:Cancel(); pihReadyTicker = nil end
+end
+
 local function pihSet(dark)
     pihGateOpen = not dark
     local n = 0
@@ -267,33 +309,71 @@ local function pihSet(dark)
     -- Sound rides the SAME edge as the visuals. It is not a container, so the gate cannot
     -- reach it -- without this it would keep announcing while we are silent.
     pihSoundsArmed(not dark)
+
+    if dark then
+        if not pihReadyTicker and C_Timer and C_Timer.NewTicker then
+            pihReadyTicker = C_Timer.NewTicker(0.5, function()
+                -- Held by hand: never fight the user's own /dfpi off.
+                if pihManual ~= nil then return end
+                if pihReadReady() then
+                    pihStopTicker()
+                    if not pihGateOpen then pihSet(false) end
+                end
+            end)
+        end
+    else
+        pihStopTicker()
+    end
     return n
 end
 
 function Engine:PIH_SetGateOpen(open) return pihSet(not open) end
 
--- Reads ONE field. `isActive` is plain in combat; startTime / duration / modRate all seal, so
--- nothing here compares a secret and nothing can throw on one.
-local function pihReadReady()
-    local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(PI_SPELL_ID)
-    if not info then return true end
-    return info.isActive ~= true
-end
 
+-- ☠ SHUT ON THE CAST, OPEN ON THE COOLDOWN CLEARING.
+-- §4b originally specified "read isActive, edge-detect, done" and explicitly REJECTED watching
+-- the cast, on the grounds that predicting a cooldown's LENGTH would be a second source of
+-- truth that could drift. That reasoning still stands and is not what this does: nothing here
+-- predicts a duration. The cast is used only as the unambiguous "it has just gone down"
+-- signal, and the cooldown itself still decides when it comes back.
+--
+-- Rejected alternative: only shut if the spell still reads unready after ~1.6s (longer than
+-- any GCD). Simpler, no new events -- and it breaks under sustained casting, where the GCD
+-- never lapses and therefore looks exactly like a real cooldown.
 local pihWatcher = CreateFrame("Frame")
 pihWatcher:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 pihWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
-pihWatcher:SetScript("OnEvent", function()
+pihWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
     if pihManual ~= nil then return end
-    -- SPELL_UPDATE_COOLDOWN fires on every global cooldown. Edge-detected, so the common case
-    -- is one boolean compare. Under the chokepoint design the edge is only an optimisation of
-    -- WHEN to broadcast -- a missed one cannot strand reality, because the next flush of any
-    -- kind re-derives from the switch.
+
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        -- The only thing that shuts the gate. Our own cast of the gate spell, nothing else.
+        if unit ~= "player" or spellID ~= PI_SPELL_ID then return end
+        if not pihGateOpen then return end
+        local n = pihSet(true)
+        DF:Debug("AURADESIGNER", "PIH gate -> DARK on cast (%d container%s)", n, n == 1 and "" or "s")
+        return
+    end
+
+    if event == "PLAYER_ENTERING_WORLD" then
+        -- ☠ THE ONE PLACE isActive MAY SHUT THE GATE. On load we never saw the cast, so a
+        -- reload mid-cooldown would otherwise leave the helper showing for the rest of it.
+        -- Safe here specifically because nothing is being cast at this instant, so a true
+        -- reading is a real cooldown rather than a GCD.
+        local ready = pihReadReady()
+        if ready ~= pihGateOpen then pihSet(not ready) end
+        return
+    end
+
+    -- SPELL_UPDATE_COOLDOWN: OPENING ONLY. Fires on every global cooldown, so it must never be
+    -- allowed to shut anything -- that is the bug this whole block exists for.
     local ready = pihReadReady()
-    if ready == pihGateOpen then return end
-    local n = pihSet(not ready)
-    DF:Debug("AURADESIGNER", "PIH gate -> %s (%d container%s)",
-        ready and "OPEN" or "DARK", n, n == 1 and "" or "s")
+    if not ready then return end
+    if pihGateOpen then return end
+    local n = pihSet(false)
+    DF:Debug("AURADESIGNER", "PIH gate -> OPEN, cooldown cleared (%d container%s)",
+        n, n == 1 and "" or "s")
 end)
 
 SLASH_DFPI1 = "/dfpi"
@@ -337,6 +417,10 @@ SlashCmdList["DFPI"] = function(msg)
             DF:Err("PI Helper: " .. tostring(how))
             return
         end
+        -- Same staleness as /dfpi watch: a rebuilt filter does not reach live containers on its own.
+        if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
+        if DF.UpdateAllFrames then DF:UpdateAllFrames() end
+        if Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
         local known, raw2 = pihFilterContents(id)
         DF:Out("PI Helper", "filter " .. tostring(how))
             :Field("filter", PIH_FILTER_NAME)
@@ -375,6 +459,14 @@ SlashCmdList["DFPI"] = function(msg)
     if wid then
         PIH_WATCH_ID = wid
         local _, how = Engine:PIH_RepairFilter()
+        -- ☠ REBUILDING THE FILTER IS NOT ENOUGH. Live containers were built from the OLD
+        -- resolved map and keep using it until something re-syncs them -- so the effect went
+        -- on watching the previous spell and showed nothing, which reads exactly like a
+        -- broken gate. Only a /reload fixed it. Same refresh chain AddPickedSpell runs after
+        -- a structural change.
+        if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
+        if DF.UpdateAllFrames then DF:UpdateAllFrames() end
+        if Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
         local n, reasons = pihSoundsArmed(pihGateOpen)
         local out = DF:Out("PI Helper", "watched spell changed")
             :Field("spell id", wid)
