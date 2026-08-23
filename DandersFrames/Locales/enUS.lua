@@ -2823,4 +2823,13 @@ L["Interrupted: %s"] = true
 -- are unique to this tooltip.
 L["Left-Click:"] = true
 L["Right-Click:"] = true
+
+-- Power Infusion Helper (Aura Designer, priest only). One block, one card, and the card
+-- flips between adding and removing -- so the two titles are a pair and must stay one
+-- verb apart in every locale.
+L["POWER INFUSION HELPER"] = true
+L["Add the helper"] = true
+L["Remove the helper"] = true
+L["Marks who is worth infusing, and goes dark while your Power Infusion is on cooldown."] = true
+L["Deletes its effects and its spell lists. Nothing else is touched."] = true
 --@end-do-not-package@

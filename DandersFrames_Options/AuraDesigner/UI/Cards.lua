@@ -22,6 +22,7 @@ local C_NOTICE = GUI.Colors.notice
 local OPTS = P.OPTS
 local GetAuraDesignerDB = P.GetAuraDesignerDB
 local GetThemeColor = P.GetThemeColor
+
 local ApplyBackdrop = P.ApplyBackdrop
 local CreateCardShell = P.CreateCardShell
 local ShowBuffCoexistPopup = P.ShowBuffCoexistPopup
@@ -71,6 +72,189 @@ local dragState = P.dragState
 local RefreshPlacedIndicators = P.RefreshPlacedIndicators
 local RefreshPreviewEffects = P.RefreshPreviewEffects
 local BuildTypeContent = P.BuildTypeContent
+
+-- ============================================================
+-- POWER INFUSION HELPER -- THE RECIPE (slice 3a)
+-- ============================================================
+-- One click builds the whole helper; one click takes it apart. Create and remove live
+-- together deliberately: the thing that knows what the helper owns is the thing that knows
+-- how to dismantle it, and building them apart means working that out twice.
+--
+-- It writes nothing new in kind. Ordinary custom filters, ordinary frame-level effects with
+-- ordinary condition groups -- the same shapes the From a Filter picker produces by hand.
+-- The only thing that makes them OURS is the sentinel id seeded into the filters.
+--
+-- ☠ THE SENTINEL IS NOT OPTIONAL. Without it nothing the recipe creates is gated, and every
+-- one of slices 1-2 applies to nothing the user can actually add.
+-- ============================================================
+
+local PIH_FILTERS = {
+    cooldowns  = "Power Infusion Helper",
+    amplifiers = "Power Infusion Helper (amplifiers)",
+    infused    = "Power Infusion Helper (infused)",
+}
+
+local PIH_PI_SPELL_ID = 10060   -- Power Infusion, for the "already infused" mark
+
+-- Seeded from the curated sets, confirmed present in SpellDB:
+--   offensiveCooldowns (45)  racials (13)  consumables (6, the potions)  trinketsItems (41)
+-- ⚠ Amplifiers are BOTH opt-in. Neither is seeded; see the empty-group trap below.
+local PIH_SEED = {
+    cooldowns  = { "offensiveCooldowns", "racials" },
+    amplifiers = { potions = "consumables", trinkets = "trinketsItems" },
+}
+
+local function pihSentinel()
+    return DF.AuraContainer and DF.AuraContainer.GetHelperSentinel
+        and DF.AuraContainer.GetHelperSentinel()
+end
+
+local function pihFilterIdByName(name)
+    local R = DF.FilterRegistry
+    if not (R and R.ReadStore) then return nil end
+    local store = R:ReadStore()
+    for id, f in pairs((store and store.customFilters) or {}) do
+        if f and f.name == name then return id end
+    end
+    return nil
+end
+
+-- Create-or-find, then seed. Idempotent: AddSpellToCustom answers "exists" for a duplicate,
+-- so re-running the recipe repairs rather than doubles.
+local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel)
+    local R = DF.FilterRegistry
+    if not (R and R.CreateCustomFilter) then return nil end
+    local id = pihFilterIdByName(name) or R:CreateCustomFilter(name)
+    if not id then return nil end
+    for _, catKey in ipairs(presetKeys or {}) do
+        local recs = R.ByCategory and R.ByCategory[catKey]
+        for _, rec in ipairs(recs or {}) do R:AddSpellToCustom(id, rec.id) end
+    end
+    for _, sid in ipairs(extraIDs or {}) do R:AddSpellToCustom(id, sid) end
+    if withSentinel then
+        local s = pihSentinel()
+        if s then R:AddSpellToCustom(id, s) end
+    end
+    return id
+end
+
+-- Is a helper configured on the CURRENT preset? Keyed on the burst effect existing, because
+-- that is the one signal that always exists when a helper does.
+local function pihBurstRef()
+    local id = pihFilterIdByName(PIH_FILTERS.cooldowns)
+    return id and DF:MakeADFilterRef("custom", id) or nil
+end
+
+function P.PIH_Exists()
+    local ref = pihBurstRef()
+    if not ref then return false end
+    local pool = CurrentAuraPool()
+    local cfg = pool and pool[ref]
+    return (type(cfg) == "table" and cfg.border ~= nil) and true or false
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- CREATE
+-- ─────────────────────────────────────────────────────────────
+-- opts.potions / opts.trinkets -- the two opt-in amplifier sets.
+function P.PIH_Create(opts)
+    opts = opts or {}
+    local pool = CurrentAuraPool()
+    if not pool then return false, "no aura pool on this preset" end
+
+    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, nil, true)
+    if not cdId then return false, "could not create the cooldown filter" end
+    local cdRef = DF:MakeADFilterRef("custom", cdId)
+
+    -- ☠ THE EMPTY-AMPLIFIER TRAP. resolveConditions SKIPS an empty group and then bails on
+    -- fewer than two groups -- at which point the effect falls back to a PLAIN UNION and the
+    -- strong-window signal silently becomes an exact duplicate of burst window: same trigger,
+    -- same behaviour, two effects contending for surfaces over nothing.
+    -- So with no amplifier opted in, strong window is not created at all. That is the honest
+    -- state: the signal has nothing to distinguish, so it should not exist.
+    local ampPresets = {}
+    if opts.potions  then ampPresets[#ampPresets + 1] = PIH_SEED.amplifiers.potions  end
+    if opts.trinkets then ampPresets[#ampPresets + 1] = PIH_SEED.amplifiers.trinkets end
+    local ampRef
+    if #ampPresets > 0 then
+        -- No sentinel: this filter is only ever a condition TRIGGER, never an effect's own
+        -- identity, so it is never the map the gate inspects.
+        local ampId = pihEnsureFilter(PIH_FILTERS.amplifiers, ampPresets, nil, false)
+        ampRef = ampId and DF:MakeADFilterRef("custom", ampId) or nil
+    end
+
+    local infId  = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID }, true)
+    local infRef = infId and DF:MakeADFilterRef("custom", infId) or nil
+
+    -- ⚠ OTHERS ONLY ON ALL OF THEM. Twins of the Sun Priestess is near-always taken and copies
+    -- every Power Infusion cast onto the priest, so an any-caster mark would light our own
+    -- frame after every cast.
+    local function mk(ref, typeKey, r, g, b, conditions)
+        if not ref then return end
+        local cfg = EnsureTypeConfig(ref, typeKey)
+        if not cfg then return end
+        cfg.color = { r = r, g = g, b = b, a = 1 }
+        cfg.othersOnly = true
+        cfg.enabled = true
+        if conditions then cfg.conditions = conditions end
+    end
+
+    -- Burst: a cooldown is running. Border, per §5b's default.
+    mk(cdRef, "border", 1.00, 0.82, 0.25)
+
+    -- Strong: a cooldown AND (a potion OR a trinket) -- they are going all in.
+    -- One group of cooldowns, one of amplifiers, combined ALL. The union inside a group is
+    -- free: "one group is just a plain union" (Factory.lua:501).
+    if ampRef then
+        mk(cdRef, "healthbar", 1.00, 0.35, 0.20, {
+            mode = "ALL",
+            groups = { { triggers = { cdRef } }, { triggers = { ampRef } } },
+        })
+    end
+
+    -- Already infused: do not double up. Its own filter so it carries the sentinel and is
+    -- gated with the rest -- if our Power Infusion is down we cannot infuse anyone anyway.
+    mk(infRef, "background", 0.55, 0.35, 0.95)
+
+    if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
+    if DF.UpdateAllFrames then DF:UpdateAllFrames() end
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
+    return true, ampRef and "created" or "created (no amplifiers: strong window omitted)"
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- REMOVE
+-- ─────────────────────────────────────────────────────────────
+-- ☠ CLEARS `sound` EXPLICITLY. The generic effects list hides sound on a filter-owned record
+-- (Groups.lua:1381), so it never offers a delete button for it -- an entry we wrote and only
+-- we can remove. Everything the recipe writes, the teardown clears.
+function P.PIH_Remove()
+    local pool = CurrentAuraPool()
+    if not pool then return false, "no aura pool on this preset" end
+    local R = DF.FilterRegistry
+
+    local removed = 0
+    for _, name in pairs(PIH_FILTERS) do
+        local id = pihFilterIdByName(name)
+        if id then
+            local ref = DF:MakeADFilterRef("custom", id)
+            if ref and pool[ref] then
+                pool[ref] = nil          -- every effect on this ref, sound included
+                removed = removed + 1
+            end
+            if R and R.DeleteCustomFilter then R:DeleteCustomFilter(id) end
+        end
+    end
+
+    if DF.InvalidateAuraLayout then DF:InvalidateAuraLayout() end
+    if DF.UpdateAllFrames then DF:UpdateAllFrames() end
+    local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
+    if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
+    return true, ("removed %d effect record(s) and their filters"):format(removed)
+end
+
+P.PIH_FILTERS = PIH_FILTERS
 
 -- ============================================================
 -- GLOBAL VIEW (used by Global tab)
@@ -2614,6 +2798,46 @@ S.BuildEffectsTab = function()
     addBlock:SetPoint("TOPLEFT", 8, yPos)
     addBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
     yPos = yPos - (addBlock.layoutHeight + 10)
+
+    -- ── POWER INFUSION HELPER (priest only) ──
+    -- ⚠ A SEPARATE BLOCK, not a fourth card in the one above. Those three answer "what shape
+    -- of indicator do you want" and then ask which spell; this one asks nothing and builds a
+    -- whole configured feature. Putting it beside them would imply it belongs to the same
+    -- question, and a card that behaves differently from its neighbours is a lying control.
+    --
+    -- ☠ The card becomes REMOVE once a helper exists on this preset, so there is one place to
+    -- look for both. Create and remove are the same feature seen from either side.
+    if select(2, UnitClass("player")) == "PRIEST" then
+        local exists = P.PIH_Exists()
+        local pihBlock = GUI:CreateChoiceCardGroup(parent, {
+            title    = L["POWER INFUSION HELPER"],
+            accent   = tc,
+            onToggle = function() S.SwitchTab("effects") end,
+            cards = {
+                {
+                    title = exists and L["Remove the helper"] or L["Add the helper"],
+                    desc  = exists
+                        and L["Deletes its effects and its spell lists. Nothing else is touched."]
+                        or  L["Marks who is worth infusing, and goes dark while your Power Infusion is on cooldown."],
+                    art   = { kind = "border", color = { 1.00, 0.82, 0.25 } },
+                    onClick = function()
+                        if P.PIH_Exists() then
+                            P.PIH_Remove()
+                        else
+                            -- ⚠ Amplifiers are BOTH opt-in and neither is on by default, so
+                            -- the strong-window signal is not created yet. 3b's panel gives
+                            -- them real controls; until then this is the honest default.
+                            P.PIH_Create({ potions = false, trinkets = false })
+                        end
+                        S.SwitchTab("effects")
+                    end,
+                },
+            },
+        })
+        pihBlock:SetPoint("TOPLEFT", 8, yPos)
+        pihBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
+        yPos = yPos - (pihBlock.layoutHeight + 10)
+    end
 
     -- ── ACTIVE INDICATORS heading ──
     local activeHeader = parent:CreateFontString(nil, "OVERLAY")
