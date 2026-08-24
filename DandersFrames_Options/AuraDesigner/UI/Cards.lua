@@ -3550,10 +3550,17 @@ S.BuildEffectsTab = function()
             -- earlier on the theory that it was what broke the layout; it was not -- leaving the
             -- height to settle was. minHeight is passed as well so it cannot shrink under the
             -- slot from the other direction.
+            -- ☠ NO minHeight. Passing the estimate as a floor was the mistake: it stopped the
+            -- box shrinking to its own text, so every pixel the estimate over-shot became empty
+            -- space INSIDE the border, under the last line. The estimate belongs on the SLOT and
+            -- nowhere else -- the slot is what the column reserves, and the box measures itself
+            -- into it.
+            -- ⚠ Over-shooting the slot now costs a little air BELOW the box, outside its border,
+            -- which is the cheap failure. Under-shooting still costs an overlap, so the estimate
+            -- stays generous.
             local function pihBox(g, text, tone)
                 local h = math.max(28, pihLines(text) * PIH_NOTE_LINE + 22)   -- 13 top + 9 bottom
-                local banner = GUI:CreateInfoBanner(parent,
-                    { tone = tone or "info", text = text, minHeight = h })
+                local banner = GUI:CreateInfoBanner(parent, { tone = tone or "info", text = text })
                 banner:SetWidth(PIH_NOTE_W)
                 g:AddWidget(banner, h + 6)
             end
