@@ -3581,7 +3581,7 @@ S.BuildEffectsTab = function()
                 if P.PIH_Exists() then
                     local banner = GUI:CreateInfoBanner(parent, {
                         tone = "info",
-                        text = L["Each signal picks where it draws. Health bar and background can show several things at once; border, name text and health text show only one, so you will be warned if something else already has it. Picking a surface another signal is using swaps the two."],
+                        text = L["Each one above has a dropdown for where it shows up. The health bar and background can show more than one thing at a time. The border and the two text colours only show one — you will be warned if something else is already using it. Pick a spot another one is using and the two trade places."],
                     })
                     banner:SetWidth((parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24)
                     g:AddWidget(banner, banner.layoutHeight)
