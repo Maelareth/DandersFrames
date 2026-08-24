@@ -114,8 +114,30 @@ local PIH_PI_SPELL_ID = 10060   -- Power Infusion, for the "already infused" mar
 
 -- Seeded from the curated sets, confirmed present in SpellDB:
 --   offensiveCooldowns (45)  racials (13)  consumables (6, the potions)  trinketsItems (41)
+-- ☠ FOUR RACIALS BY NAME, NOT THE WHOLE CATEGORY. The plan seeded all thirteen with the note
+-- "Fireblood et al are ordinary burst". That was wrong: `racials` is not "offensive racials", it
+-- is every racial ability, and nine of the thirteen are nothing of the kind -- Shadowmeld,
+-- Darkflight, Spatial Rift, Stoneform, Gift of the Naaru, Regeneratin', Bull Rush, Thorn Bloom
+-- and Hyper Organic Light Originator. The helper would have lit up when someone stealthed or ran
+-- away, which is the opposite of worth infusing.
+--
+-- ⚠ AND THE DATA CANNOT TELL THEM APART. Every racial record carries `cats = { racials = true }`
+-- and nothing else -- checked, not assumed -- so there is no category to intersect with and an
+-- explicit list is the only honest option. The cost is maintenance: a new racial in a future
+-- patch will not appear here on its own. Accepted, because the failure mode of the alternative
+-- is a helper that fires on Shadowmeld and the failure mode of this one is a helper that misses
+-- a racial nobody has had time to notice yet.
+-- Not a class token, and it cannot collide with one: class files are uppercase letters only.
+local PIH_RACIAL_TOKEN = "@racials"
+local PIH_RACIAL_IDS = {
+    273104,  -- Fireblood       (Dark Iron Dwarf) -- primary stat
+    274739,  -- Ancestral Call  (Mag'har Orc)     -- secondary stat
+    20572,   -- Blood Fury      (Orc)             -- attack / spell power
+    26297,   -- Berserking      (Troll)           -- haste
+}
+
 local PIH_SEED = {
-    cooldowns  = { "offensiveCooldowns", "racials" },
+    cooldowns  = { "offensiveCooldowns" },
     amplifiers = { potions = "consumables", trinkets = "trinketsItems" },
 }
 
@@ -152,9 +174,9 @@ end
 -- Localised at call time, not at file scope: the same locale-timing rule the effect-label
 -- tables in Groups.lua follow.
 local function pihLabel(key)
-    if key == "burst"   then return L["PI Helper — Burst window"]    end
-    if key == "strong"  then return L["PI Helper — Strong window"]   end
-    if key == "infused" then return L["PI Helper — Already infused"] end
+    if key == "burst"   then return L["PI Helper — Big cooldown"]    end
+    if key == "strong"  then return L["PI Helper — Big cooldown with a trinket or potion"]   end
+    if key == "infused" then return L["PI Helper — Already has active Power Infusion"] end
 end
 
 local function pihSentinel()
@@ -307,7 +329,7 @@ local function pihCreateSignal(key)
 
     local s = P.PIH_Settings()
 
-    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, nil, true)
+    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, PIH_RACIAL_IDS, true)
     if not cdId then return false, "could not build the cooldown list" end
     local cdRef = DF:MakeADFilterRef("custom", cdId)
     if not cdRef then return false, "could not name the cooldown list" end
@@ -329,7 +351,7 @@ local function pihCreateSignal(key)
         -- So with no amplifier ticked, strong window is not created at all. That is the honest
         -- state: the signal has nothing left to distinguish, so it should not exist.
         local ampId = pihSyncAmplifierFilter(s)
-        if not ampId then return false, "strong window needs a potion or a trinket ticked" end
+        if not ampId then return false, "this signal needs a potion or a trinket ticked" end
         local ampRef = DF:MakeADFilterRef("custom", ampId)
         if not ampRef then return false, "could not name the amplifier list" end
         -- A cooldown AND (a potion OR a trinket). One group of each, combined ALL -- the union
@@ -581,6 +603,11 @@ local function pihClassList()
     for _, token in ipairs((R and R.PickerClassOrder) or {}) do
         if present[token] then out[#out + 1] = token end
     end
+    -- ⚠ RACIALS RIDE LAST, AS A PSEUDO-CLASS. They belong to no class -- every racial record is
+    -- tagged "ALL" -- so the loop above can never surface them, and without a row of their own
+    -- they would be the one part of the list nothing in this panel could switch off. Last
+    -- because it is not a class, and the registry's own spell lists group "All Classes" last too.
+    out[#out + 1] = PIH_RACIAL_TOKEN
     return out
 end
 P.PIH_ClassList = pihClassList
@@ -596,6 +623,12 @@ function P.PIH_ClassOn(classFile)
     local f = id and R and R.GetCustomFilter and R:GetCustomFilter(id)
     -- No list yet means nothing has been taken away yet.
     if not f then return true end
+    if classFile == PIH_RACIAL_TOKEN then
+        for _, sid in ipairs(PIH_RACIAL_IDS) do
+            if f.spells[sid] or f.rawIDs[sid] then return true end
+        end
+        return false
+    end
     for _, catKey in ipairs(PIH_SEED.cooldowns) do
         for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
             if rec.class == classFile and (f.spells[rec.id] or f.rawIDs[rec.id]) then
@@ -613,6 +646,14 @@ local function pihApplyClass(classFile, on)
     local R = DF.FilterRegistry
     local id = pihFilterIdByName(PIH_FILTERS.cooldowns)
     if not (id and R) then return end
+    if classFile == PIH_RACIAL_TOKEN then
+        -- The same four the list was seeded from, so ticking it back restores exactly what was
+        -- taken away rather than the whole racial category.
+        for _, sid in ipairs(PIH_RACIAL_IDS) do
+            if on then R:AddSpellToCustom(id, sid) else R:RemoveSpellFromCustom(id, sid) end
+        end
+        return
+    end
     for _, catKey in ipairs(PIH_SEED.cooldowns) do
         for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
             if rec.class == classFile then
@@ -724,6 +765,12 @@ end
 function P.PIH_SetGateEnabled(on)
     P.PIH_Settings().gateEnabled = on and true or false
     P.PIH_Apply()
+end
+
+-- The cooldown list's registry id, for deep-linking straight to it in the Filter Designer.
+-- nil before the helper exists, which is also when the button that uses it must be dead.
+function P.PIH_CooldownFilterID()
+    return pihFilterIdByName(PIH_FILTERS.cooldowns)
 end
 
 P.PIH_FILTERS = PIH_FILTERS
@@ -3295,7 +3342,7 @@ S.BuildEffectsTab = function()
                     title = exists and L["Remove the helper"] or L["Add the helper"],
                     desc  = exists
                         and L["Deletes its indicators and its spell lists. Nothing else is touched."]
-                        or  L["Marks who is worth infusing, and goes dark while your Power Infusion is on cooldown."],
+                        or  L["Shows who is worth infusing, and goes dark while your Power Infusion is on cooldown."],
                     art   = { kind = "border", color = { 1.00, 0.82, 0.25 } },
                     onClick = function()
                         if P.PIH_Exists() then P.PIH_Remove() else P.PIH_Create() end
@@ -3306,7 +3353,7 @@ S.BuildEffectsTab = function()
         })
         pihBlock:SetPoint("TOPLEFT", 8, yPos)
         pihBlock:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-        yPos = yPos - (pihBlock.layoutHeight + 10)
+        yPos = yPos - (pihBlock.layoutHeight + GUI.Space.section)
 
         -- ── THE SETTINGS, FOLDED WITH THE CARD ──
         -- ☠ GATED ON pihBlock.expanded, NOT ONLY ON THE HELPER EXISTING. The card group carries
@@ -3322,15 +3369,30 @@ S.BuildEffectsTab = function()
         -- Appearance (colour, border style, which surface) stays on the effect rows, because
         -- that genuinely differs per signal and is where the AD already puts appearance.
         if exists and pihBlock.expanded then
+            -- ☠ INDENTED, AND THAT IS THE WHOLE POINT OF THE CHANGE. These boxes used to start at
+            -- the same left edge as "Add an indicator" and "Active indicators", so a column of
+            -- five same-level boxes read as five sections rather than as one section and the
+            -- four boxes belonging to it. Nothing said which header owned them. Ten pixels of
+            -- indent is what says it -- the hierarchy was always there, it just was not drawn.
+            -- ⚠ 20 IS THE ADDON'S INDENT STEP, not a number picked here: the page layout engine
+            -- reads `widget.indent` and multiplies by 20 per level. That flag cannot be used
+            -- directly -- this column lays itself out by hand rather than going through the page
+            -- engine -- so the step is borrowed instead of the mechanism, which at least keeps
+            -- one indent width in the addon rather than two.
+            local PIH_INDENT = 20
             local function pihGroup(header, buildFn, opts)
-                local group = GUI:CreateSettingsGroup(parent, (parent:GetWidth() or 320) - 26, opts)
+                local group = GUI:CreateSettingsGroup(parent,
+                    (parent:GetWidth() or 320) - (PIH_INDENT + 18), opts)
                 group.padding = 10
                 group:AddWidget(GUI:CreateHeader(parent, header), GUI.RowHeight.sectionHeader)
                 buildFn(group)
                 local h = group:LayoutChildren()
-                group:SetPoint("TOPLEFT", 8, yPos)
+                group:SetPoint("TOPLEFT", PIH_INDENT, yPos)
                 group:SetPoint("RIGHT", parent, "RIGHT", -8, 0)
-                yPos = yPos - (h + 10)
+                -- The named scale, not a number that looks about right. GUI.Space carries a note
+                -- about an audit that found 58 spacers using 9 different values for two intents,
+                -- and three files each inventing their own for the same one.
+                yPos = yPos - (h + GUI.Space.section)
             end
 
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
@@ -3342,8 +3404,12 @@ S.BuildEffectsTab = function()
                     function(v)
                         P.PIH_SetSignal(key, v)
                         S.SwitchTab("effects")   -- the dependent groups appear and vanish with it
-                    end), 24)
-                g:AddWidget(GUI:CreateLabel(parent, desc), 26)
+                    end))
+                -- ⚠ Optional, and one row genuinely goes without. A line under a tick earns its
+                -- space by saying something the tick cannot; "Already has active Power Infusion"
+                -- says the whole thing on its own, so a gloss beneath it is just the label again
+                -- in different words.
+                if desc then g:AddWidget(GUI:CreateLabel(parent, desc)) end
 
                 -- The surface picker, and it only exists while the signal does: "where does
                 -- this draw" is not a question about a signal that draws nothing.
@@ -3359,7 +3425,12 @@ S.BuildEffectsTab = function()
                         P.PIH_SetSurface(key, v)
                         S.SwitchTab("effects")   -- the other rows' menus re-grey around it
                     end,
-                    { inline = true }), 26)
+                    -- ⚠ An INLINE dropdown does not own its slot: CreateDropdown only stamps
+                    -- fixedRowHeight on the standalone form, so this literal is authoritative and
+                    -- a hand-guessed one gets read. Content is 24 tall; the tight gap is right
+                    -- because hiding the label makes it a compact row -- its control sits beside
+                    -- its name (the checkbox above) rather than under it.
+                    { inline = true }), 24 + GUI.RowGapTight)
 
                 -- ⚠ THE CLASH WARNING, AND IT IS SCOPED ON PURPOSE. pickWinner decides from
                 -- config alone and never asks what is on the unit, so a clash is fully knowable
@@ -3382,13 +3453,22 @@ S.BuildEffectsTab = function()
                 end
             end
 
-            pihGroup(L["WHAT TO MARK"], function(g)
-                signalRow(g, "burst", L["Burst window"],
-                    L["Someone in your group used a big cooldown."])
-                signalRow(g, "strong", L["Strong window"],
-                    L["A big cooldown and a potion or trinket — they are going all in."])
-                signalRow(g, "infused", L["Already infused"],
-                    L["They already have Power Infusion — do not double up."])
+            pihGroup(L["What to Show"], function(g)
+                -- ☠ A LABEL IN THE FIRST BOX, NOT A FREE-FLOATING INFO BANNER. The banner was
+                -- built and removed the same day: it measures its own height a frame after it is
+                -- drawn, and this column stacks its children at fixed offsets with no reflow
+                -- seam -- so the banner grew from its 34px placeholder and landed on top of the
+                -- box below it. That failure is documented in GUI:RelayoutHost, which names the
+                -- same symptom on the indicator cards ("the Duration Bar header overlapping the
+                -- Pandemic section's collapse bar") and fixes it through `dfAD_ReflowWidgets`,
+                -- a seam the indicator cards publish and this column does not.
+                -- ⚠ Inside a group, a measured label re-flows its host and settles. Outside one
+                -- it has nothing to tell. Same converge, different owner.
+                g:AddWidget(GUI:CreateLabel(parent,
+                    L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."]))
+                signalRow(g, "burst", L["Big cooldown"])
+                signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
+                signalRow(g, "infused", L["Already has active Power Infusion"])
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
@@ -3404,14 +3484,14 @@ S.BuildEffectsTab = function()
                 g:AddWidget(GUI:CreateCheckbox(parent,
                     L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
                     function() return P.PIH_Settings().gateEnabled ~= false end,
-                    function(v) P.PIH_SetGateEnabled(v) end), 24)
+                    function(v) P.PIH_SetGateEnabled(v) end))
             end)
 
             -- ☠ ONLY WHILE STRONG WINDOW IS ON. These two are what the signal MEANS, so on
             -- their own they are a question about nothing. Shown rather than greyed, because a
             -- greyed pair would invite the reading that strong window works without them.
             if P.PIH_SignalOn("strong") then
-                pihGroup(L["WHAT COUNTS AS A STRONG WINDOW"], function(g)
+                pihGroup(L["Trinkets and Potions"], function(g)
                     -- ☠ UNTICKING BOTH TAKES THE SIGNAL WITH IT. Strong window is "a cooldown
                     -- AND (a potion OR a trinket)". With neither ticked the amplifier group is
                     -- empty, resolveConditions skips it, bails on fewer than two groups, and the
@@ -3419,74 +3499,86 @@ S.BuildEffectsTab = function()
                     -- recipe deletes it instead, and ticking one back brings it into existence.
                     g:AddWidget(GUI:CreateCheckbox(parent, L["Combat potions"], nil, nil, nil,
                         function() return P.PIH_Settings().potions == true end,
-                        function(v) P.PIH_SetAmplifier("potions", v); S.SwitchTab("effects") end), 24)
+                        function(v) P.PIH_SetAmplifier("potions", v); S.SwitchTab("effects") end))
                     g:AddWidget(GUI:CreateCheckbox(parent, L["On-use trinkets"], nil, nil, nil,
                         function() return P.PIH_Settings().trinkets == true end,
-                        function(v) P.PIH_SetAmplifier("trinkets", v); S.SwitchTab("effects") end), 24)
-                    g:AddWidget(GUI:CreateLabel(parent,
-                        L["Unticking both removes the strong window signal."]), 26)
+                        function(v) P.PIH_SetAmplifier("trinkets", v); S.SwitchTab("effects") end))
                 end)
             end
 
-            pihGroup(L["NEVER MARK"], function(g)
+            pihGroup(L["Never Show On"], function(g)
                 -- ⚠ FAILS OPEN. A group with no assigned roles reads as "no role" for everyone
                 -- and nothing is excluded. Marking a tank you did not want is a smaller failure
                 -- than silently hiding the signal on the damage dealers you did.
                 g:AddWidget(GUI:CreateCheckbox(parent, L["Tanks"], nil, nil, nil,
                     function() return (P.PIH_Settings().roles or {}).TANK == true end,
-                    function(v) P.PIH_SetRole("TANK", v) end), 24)
+                    function(v) P.PIH_SetRole("TANK", v) end))
                 g:AddWidget(GUI:CreateCheckbox(parent, L["Healers"], nil, nil, nil,
                     function() return (P.PIH_Settings().roles or {}).HEALER == true end,
-                    function(v) P.PIH_SetRole("HEALER", v) end), 24)
+                    function(v) P.PIH_SetRole("HEALER", v) end))
                 g:AddWidget(GUI:CreateLabel(parent,
-                    L["Groups without assigned roles are never excluded."]), 26)
+                    L["Only applies when the group has roles."]))
             end)
 
             -- ☠ COLLAPSIBLE, AND THIRTEEN ROWS IS WHY. Everything else in this panel is two or
             -- three ticks; a class list is as long as the game has classes, and most people
             -- will never open it. The summary on the header carries the state while it is
             -- folded, so the box does not have to be open to be honest.
-            pihGroup(L["ONLY WATCH"], function(g)
-                local anyOff = false
-                for _, token in ipairs(P.PIH_ClassList()) do
-                    local classFile = token
-                    if not P.PIH_ClassOn(classFile) then anyOff = true end
-                    -- Read at call time: SpellPicker.lua loads after this file, so the display
-                    -- helper does not exist yet at file scope.
-                    local name = (DF.FilterRegistry and DF.FilterRegistry.ClassDisplayName
-                        and DF.FilterRegistry.ClassDisplayName(classFile)) or classFile
-                    g:AddWidget(GUI:CreateCheckbox(parent, name, nil, nil, nil,
-                        function() return P.PIH_ClassOn(classFile) end,
-                        function(v) P.PIH_SetClassOn(classFile, v) end), 24)
-                end
-                -- ⚠ The pointer is not a consolation prize. This box does classes because the
-                -- spell data records classes; anyone who wants one spell gone has a real editor
-                -- for it, and saying so is the difference between a limit and a dead end.
-                -- ☠ AND IT IS THE SAME LIST FROM BOTH ENDS. These ticks read the list rather
-                -- than a stored copy of it, so an edit made over there shows up here on the way
-                -- back -- untick every Warrior cooldown by hand and Warrior unticks itself.
-                g:AddWidget(GUI:CreateLabel(parent, anyOff
-                    and L["Unticked classes' cooldowns have been taken out of the helper's spell list. The same list is editable spell by spell in the Filter Designer."]
-                    or  L["Untick a class to stop watching its cooldowns. The same list is editable spell by spell in the Filter Designer."]), 40)
+            pihGroup(L["Classes to Watch"], function(g)
+                -- ☠ ABOVE THE TICKS, NOT BELOW THEM. Fourteen rows is far enough that a line
+                -- underneath is a line nobody reads -- it arrives after the reader has already
+                -- decided what the box does. The one sentence that explains the box goes where
+                -- the reader still needs it.
+                g:AddWidget(GUI:CreateLabel(parent, L["Untick a class to ignore its cooldowns."]))
 
-                -- Reusing the jump this page already offers rather than a second way of getting
-                -- there, disabled state included: a button that goes nowhere is worse than none.
+                -- ☠ ABOVE THE LIST, NOT UNDER IT. Fourteen ticks is far enough that a button at
+                -- the bottom is a button nobody scrolls to -- and this is the escape hatch for
+                -- the thing the list cannot do (single spells), so it has to be visible while
+                -- someone is still deciding the list is not enough.
+                --
+                -- ⭐ GUI:OpenFilterInDesigner, NOT a bare SelectTab. It switches the page AND
+                -- scrolls to this filter, selects it and pulses it. Its own comment records why:
+                -- the hand-written version "landed you on the page with nothing indicated, which
+                -- is indistinguishable from a broken link" -- which is exactly what was here.
+                g:AddWidget(GUI:CreateLabel(parent,
+                    L["To add or remove single spells, open the list itself."]))
+                local cfID = P.PIH_CooldownFilterID and P.PIH_CooldownFilterID()
                 local fdBtn = GUI:CreateButton(parent, L["Filter Designer"], 140, 22, function()
-                    if GUI.SelectTab and GUI.Pages and GUI.Pages["auras_filterdesigner"] then
-                        GUI.SelectTab("auras_filterdesigner")
+                    GUI:OpenFilterInDesigner("custom", cfID)
+                    -- ⚠ TWICE, ONE FRAME APART, AND THAT IS A WORKAROUND. _fdFocusFilter reads
+                    -- GetVerticalScrollRange to clamp its scroll, and on the page's FIRST build
+                    -- that range is still 0 -- so the clamp pins the scroll at the top and the
+                    -- row it selected and pulsed is somewhere below the fold. The second call
+                    -- runs after layout, when the range is real. The proper fix is a deferred
+                    -- retry inside _fdFocusFilter itself; that file is Danders' and it is on the
+                    -- list for him rather than edited from here.
+                    if C_Timer and C_Timer.After then
+                        C_Timer.After(0, function() GUI:OpenFilterInDesigner("custom", cfID) end)
                     end
                 end)
-                if not (GUI.Pages and GUI.Pages["auras_filterdesigner"]) then
+                if not (cfID and GUI.Pages and GUI.Pages["auras_filterdesigner"]) then
                     fdBtn:Disable()
                     fdBtn.Text:SetTextColor(0.4, 0.4, 0.4)
                 end
                 g:AddWidget(fdBtn, 28)
+
+                for _, token in ipairs(P.PIH_ClassList()) do
+                    local classFile = token
+                    -- Read at call time: SpellPicker.lua loads after this file, so the display
+                    -- helper does not exist yet at file scope.
+                    local name = (classFile == "@racials") and L["Racials"]
+                        or ((DF.FilterRegistry and DF.FilterRegistry.ClassDisplayName
+                            and DF.FilterRegistry.ClassDisplayName(classFile)) or classFile)
+                    g:AddWidget(GUI:CreateCheckbox(parent, name, nil, nil, nil,
+                        function() return P.PIH_ClassOn(classFile) end,
+                        function(v) P.PIH_SetClassOn(classFile, v) end))
+                end
             -- ⚠ NO showSummary. The collapsed summary concatenates every child label, which for
             -- thirteen classes and a two-line note is a wall of text rather than a summary. The
             -- header alone says what is folded away, which is what a summary was for.
             end, { collapsible = true, collapseKey = "pihelper:onlywatch" })
 
-            pihGroup(L["SOUND"], function(g)
+            pihGroup(L["Sound Alert"], function(g)
                 -- ☠ TWO SETTINGS, NOT ONE. The key remembers WHICH sound, the switch remembers
                 -- WHETHER -- so turning it off and back on does not make anyone hunt for their
                 -- sound a second time. Silent until chosen, either way: a cue nobody asked for
@@ -3494,16 +3586,16 @@ S.BuildEffectsTab = function()
                 g:AddWidget(GUI:CreateCheckbox(parent, L["Play a sound when a window opens"],
                     nil, nil, nil,
                     function() return P.PIH_Settings().soundOn == true end,
-                    function(v) P.PIH_SetSoundOn(v); S.SwitchTab("effects") end), 24)
+                    function(v) P.PIH_SetSoundOn(v); S.SwitchTab("effects") end))
                 if P.PIH_Settings().soundOn then
                     g:AddWidget(GUI:CreateSoundDropdown(parent, L["Sound"],
                         P.PIH_Settings(), "soundLSMKey",
-                        function() P.PIH_ApplySound() end), 54)
+                        function() P.PIH_ApplySound() end), GUI.RowHeight.dropdown)
                     -- ⚠ Stated rather than discovered in a fight: sound rides the same gate as
                     -- the visuals, and it announces new windows only -- a window already open
                     -- when the gate re-opens stays silent, because the visuals already carry it.
                     g:AddWidget(GUI:CreateLabel(parent,
-                        L["Silent while Power Infusion is on cooldown, and never for your own casts."]), 26)
+                        L["Only plays while your Power Infusion is ready."]))
                 end
             end)
 
