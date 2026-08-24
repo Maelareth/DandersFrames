@@ -331,6 +331,12 @@ local function pihCreateSignal(key)
 
     local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, PIH_RACIAL_IDS, true)
     if not cdId then return false, "could not build the cooldown list" end
+    -- ☠ RECORDED FOR THE RESIDENT HALF, WHICH CANNOT SEE THIS FILE. The sound registrations run
+    -- in the always-loaded addon and need this list; they used to find it by NAME and were
+    -- looking for the scaffolding filter, so they resolved nothing and no sound could ever play.
+    -- The id travels in the helper's own settings, which the resident half already reads.
+    -- ⚠ An ID rather than a name: a custom filter can be renamed in the Filter Designer.
+    s.cooldownFilterID = cdId
     local cdRef = DF:MakeADFilterRef("custom", cdId)
     if not cdRef then return false, "could not name the cooldown list" end
 
@@ -715,6 +721,12 @@ function P.PIH_Remove()
     -- The SETTING is left alone: it is behaviour, and behaviour survives a remove.
     local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
     if Engine and Engine.PIH_SetSound then Engine:PIH_SetSound(nil) end
+
+    -- The recorded list id goes with the list. Leaving it would point the resident half at a
+    -- filter that no longer exists -- harmless today, and exactly the kind of stale pointer that
+    -- reads as a bug the next time someone adds a helper and it resolves the wrong thing.
+    local st = P.PIH_Settings()
+    if st then st.cooldownFilterID = nil end
 
     pihRefresh()
     return true, ("removed %d signal(s) and their spell lists"):format(n)

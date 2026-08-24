@@ -179,6 +179,28 @@ local function pihFindFilter()
     return nil
 end
 
+-- ☠ NOT PARTY-ONLY, AND IT WAS. This read hardcoded the party preset while the settings panel
+-- writes to whichever mode the Aura Designer is editing -- so a helper configured in RAID mode
+-- had its gate, its role exclusions and its sound silently dropped on every load, while its
+-- indicators carried on rendering from the raid pool. It would have read as the gate simply
+-- not working, with nothing on screen to explain it. Caught in review, before anyone met it.
+--
+-- ⚠ FIRST PRESET THAT HAS A HELPER WINS, PARTY FIRST. The gate is ONE switch for the whole
+-- addon, so two presets carrying different helper settings is an ambiguity no read can resolve
+-- -- taking the first is a choice, not a derivation. Party first because that is where the
+-- feature is used. If this ever needs to differ per mode, the gate has to become per-mode
+-- first, and that is a bigger change than a better read.
+local PIH_MODES = { "party", "raid" }
+local function pihSettings()
+    if not DF.GetModeBaseAuraDesigner then return nil end
+    for _, mode in ipairs(PIH_MODES) do
+        local adDB = DF:GetModeBaseAuraDesigner(mode)
+        local s = adDB and adDB.pihelper
+        if s then return s end
+    end
+    return nil
+end
+
 function Engine:PIH_EnsureFilter()
     local R = DF.FilterRegistry
     if not (R and R.CreateCustomFilter) then return nil, "FilterRegistry unavailable" end
@@ -230,10 +252,27 @@ local function pihFilterContents(id)
 end
 
 -- Resolve the helper filter's spell map, for the sound registrations.
+-- ☠ THIS RESOLVED THE WRONG FILTER, AND THE SOUND COULD THEREFORE NEVER PLAY.
+-- It looked the list up BY NAME, and the name it used was `PIH_FILTER_NAME` -- the throwaway
+-- scaffolding filter that only exists if a developer has run `/dfpi setup`. The recipe builds
+-- "Power Infusion Helper". On every real install the lookup missed, the map came back nil,
+-- `helperSoundMapFor` bailed on the first line, and every registration was skipped: zero
+-- sounds, always. ⚠ AND THE TEST FOR IT PASSED -- it asked whether the SETTING survived a
+-- reload, which it did perfectly. A test that never asks whether a sound comes out cannot
+-- tell a working feature from an inert one. Caught in review, not in the field.
+--
+-- ⚠ BY ID, NOT BY NAME. A custom filter can be renamed in the Filter Designer, and the id has
+-- to keep working when the sentinel is replaced by `config.dfGate` -- so the recipe records the
+-- id it created and this reads that. Name matching survives only as the scaffolding fallback.
 local function pihResolvedMap()
     local R = DF.FilterRegistry
-    local id = pihFindFilter()
-    if not (id and R and R.ResolveSelection) then return nil end
+    if not (R and R.ResolveSelection) then return nil end
+    local s = pihSettings()
+    local id = s and s.cooldownFilterID
+    if not (id and R.GetCustomFilter and R:GetCustomFilter(id)) then
+        id = pihFindFilter()   -- `/dfpi setup`'s own filter, for the scaffolding commands
+    end
+    if not id then return nil end
     local res = R:ResolveSelection({ customs = { [id] = true } })
     return (res and res.kind == "include") and res.map or nil
 end
@@ -433,8 +472,7 @@ end
 -- Reads the party preset: the helper is per-preset (§2), and a party/raid split sharing one
 -- preset shares the helper, which is the addon's model for every other effect.
 function Engine:PIH_ApplySaved()
-    local adDB = DF.GetModeBaseAuraDesigner and DF:GetModeBaseAuraDesigner("party")
-    local s = adDB and adDB.pihelper
+    local s = pihSettings()
     if not s then return false end
 
     if DF.AuraContainer and DF.AuraContainer.SetHelperExcludedRoles then
