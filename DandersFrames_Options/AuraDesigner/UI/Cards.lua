@@ -3520,12 +3520,23 @@ S.BuildEffectsTab = function()
             -- Delete all of this the day the column publishes a `dfAD_ReflowWidgets` seam.
             local PIH_NOTE_LINE = 13
             local PIH_NOTE_W = (parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24
+            -- ⭐ 6 PIXELS PER CHARACTER, AND THAT NUMBER WAS MEASURED, NOT PICKED.
+            -- It was 8, which is where seven rounds of gaps came from: at a note width of 400 the
+            -- panel fits ~74 characters on a line, so 400/74 is about 5.4 -- and reserving for 50
+            -- meant every long note claimed half again as many lines as it needed. The big one
+            -- asked for 8 lines to hold 5.
+            -- ⚠ 6 rather than 5.4 on purpose: it still errs long, by roughly a line on a
+            -- paragraph, and that line is the margin a longer translation gets to grow into.
+            -- ☠ Do NOT try to verify this from the widget. `/dfpi layout` showed every note
+            -- reporting a height of 30 whatever its text, because a pinned label's frame never
+            -- grows -- the FontString simply draws past it. The slot IS the layout here; the
+            -- frame height is not evidence of anything.
             local function pihLines(text)
-                local cpl = math.max(20, math.floor(PIH_NOTE_W / 8))
+                local cpl = math.max(20, math.floor(PIH_NOTE_W / 6))
                 -- ⚠ Colour escapes are not characters anyone can see. Counting them would add
                 -- twelve bytes per highlighted word and inflate the box by a line or two of pure
                 -- whitespace, which is the fault this estimator exists to avoid.
-                local plain = tostring(text):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                local plain = tostring(text):gsub("||r", "")
                 return math.max(1, math.ceil(#plain / cpl))
             end
             -- ⭐ GUI:CreateNote, not a hand-coloured CreateLabel. It IS the toned-note widget --
