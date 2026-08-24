@@ -3567,12 +3567,19 @@ S.BuildEffectsTab = function()
                 g:AddWidget(GUI:CreateLabel(parent,
                     L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."]))
 
-                -- ☠ THE SURFACE RULES, ONCE, WHERE THE DROPDOWNS ARE. Three facts a reader
+                signalRow(g, "burst", L["Big cooldown"])
+                signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
+                signalRow(g, "infused", L["Already has active Power Infusion"])
+
+                -- ☠ THE SURFACE RULES, BELOW THE DROPDOWNS THEY DESCRIBE. Three facts a reader
                 -- cannot deduce from the controls: that some surfaces show several things at
                 -- once and others pick a single winner, that a warning appears for the second
                 -- kind, and that picking an occupied one swaps rather than refusing. The swap in
                 -- particular is unguessable -- it is the one behaviour here that does something
                 -- to a control the user did not touch, so it has to be stated before it happens.
+                -- ⚠ Under the rows, not over them: an explanation of the dropdowns that arrives
+                -- before you have seen one is a glossary, and reads as work to do before the
+                -- controls make sense. User's call, 2026-08-24.
                 --
                 -- ⚠ INSIDE THE GROUP, which is the whole reason this is a banner at all. Free
                 -- on the column it would measure itself a frame late and land on the box below;
@@ -3586,10 +3593,6 @@ S.BuildEffectsTab = function()
                     banner:SetWidth((parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24)
                     g:AddWidget(banner, banner.layoutHeight)
                 end
-
-                signalRow(g, "burst", L["Big cooldown"])
-                signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
-                signalRow(g, "infused", L["Already has active Power Infusion"])
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
