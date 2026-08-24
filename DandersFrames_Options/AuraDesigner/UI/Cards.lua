@@ -3712,54 +3712,25 @@ S.BuildEffectsTab = function()
                     function(v) P.PIH_SetGateEnabled(v) end))
 
 
-                -- ☠☠ PER WORD, NOT ONCE AROUND THE PHRASE -- and two rounds of "the colour is
-                -- too subtle" were this, not a colour choice.
+                -- ☠☠ TWO ONE-LINE NOTES, AND THE LENGTH IS THE WHOLE POINT.
+                -- Seven attempts went into sizing one long paragraph here, and the readout that
+                -- finally produced evidence said this: notes of 38-53 characters reserved their
+                -- space to within 2px, while the 359-character one was out by 93. Short notes are
+                -- exact; long ones drift, whatever constant is used. So the fix is not a better
+                -- estimate, it is text that fits on one line -- where ceil() has nothing to round
+                -- up and the estimate cannot be wrong.
                 --
-                -- The banner renders through SetHTML, which splits plain text on SPACES and
-                -- gives every word its own FontString. A |c…|r spanning several words dies at
-                -- the split: the opener lands on the first word, the |r on the last, and every
-                -- word in between falls back to the body grey. So "Big cooldown with a trinket
-                -- or potion" was never a coloured phrase -- it was one coloured word followed by
-                -- six grey ones, which is exactly what "makes very little difference" looks like.
-                -- White got blamed for it, then the info accent got blamed for it. Neither was
-                -- the problem; both were mostly not being applied.
+                -- ⚠ WHAT WAS CUT, AND WHY THESE TWO SURVIVED. The paragraph had four sentences.
+                -- The swap rule is already written into the dropdown entry itself ("Health Bar
+                -- (swap with Big cooldown)"), and it appears at the moment it matters rather than
+                -- in advance. That "Already has active Power Infusion" can share follows from the
+                -- two lines below. These two are the only facts nothing else on the panel ever
+                -- states, so they are the two that had to stay.
                 --
-                -- ⭐ Documented in FilterRegistry/UI/Options.lua, which hit the identical bug and
-                -- shipped it for a revision: "the banner drew a green 'Buff' beside a grey
-                -- 'Filters' while the popup -- ONE FontString, no splitting -- drew the whole
-                -- phrase green off the identical string." Its conclusion is the rule here:
-                -- "anything that formats text for the banner must do this; a phrase helper that
-                -- wraps once is only ever right by accident, when the phrase happens to be a
-                -- single word."
-                --
-                -- ⚠ Only the three indicator names. All seven terms were marked up at one point
-                -- and the paragraph became unreadable: when most of the nouns are picked out,
-                -- nothing is. The display types are short and already capitalised.
-                -- ⭐ THE BANNER'S OWN ACCENT. FilterRegistry/UI/Options.lua:812 calls ToneHex
-                -- "the sanctioned helper for inline emphasis"; Groups.lua:824 uses ToneHex("info")
-                -- for an inline "(Custom)" tag; and GetToneColor's note says the accent is the value
-                -- "tuned to sit on the banner's own bg". That page rejected it for ITS box because
-                -- it needed buff-vs-debuff CATEGORY colours and a tone hex would have made the
-                -- debuff sentence read as a warning -- we signal no category, and info is the
-                -- neutral tone, so the objection does not reach here.
-                -- ⚠ White was the previous value and is wrong in a banner: the body text is
-                -- already 0.85 white, so it is a 15 per cent lift and reads as unevenness.
-                local EMPH = GUI.ToneHex and GUI:ToneHex("info") or "ff99ccff"
-                local function hi(s)
-                    return (tostring(s or "?"):gsub("%S+", function(w)
-                        return "|c" .. EMPH .. w .. "|r"
-                    end))
-                end
-                local labels = S.FRAME_LEVEL_LABELS or {}
-                pihNote(g, format(
-                    L["%s and %s can never share the same display type — pick the one the other is using and they swap. %s can share display type with either of them. %s and %s can be used by several indicators at once. %s and %s can only be used by one indicator at a time."],
-                    hi(L["Big cooldown"]),
-                    hi(L["Big cooldown with a trinket or potion"]),
-                    hi(L["Already has active Power Infusion"]),
-                    labels.healthbar or L["Health Bar"],
-                    labels.background or L["Background"],
-                    labels.border or L["Border"],
-                    L["Text colours"]))
+                -- ⚠ No inline highlighting left either: these name display types, not
+                -- indicators, and the display-type names are short and already capitalised.
+                pihNote(g, L["Health Bar and Background can show several indicators at once."])
+                pihNote(g, L["Border and Text colours show only one at a time."])
             end)
 
             -- ☠ ONLY WHILE STRONG WINDOW IS ON. These two are what the signal MEANS, so on
