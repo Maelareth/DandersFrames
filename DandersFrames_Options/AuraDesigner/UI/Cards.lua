@@ -865,6 +865,21 @@ end
 P.PIH_FILTERS = PIH_FILTERS
 P.PIH_SIGNAL_ORDER = PIH_SIGNAL_ORDER
 
+-- ☠☠ MEASURED ONCE, THEN REMEMBERED -- because guessing a box's height cannot be got right.
+-- Four rounds of this: too tall and the boxes below slid down behind a gap, too short and they
+-- were overlapped, and no constant is right at every panel width or in every language. Nothing
+-- can be measured at build time either -- CreateLabel's own note records that attempt failing,
+-- because nothing has been drawn yet.
+--
+-- So the box is built with an estimate, asked how tall it actually turned out a moment later,
+-- and the answer is kept. The panel rebuilds once with the real number and is exact from then on.
+--
+-- ⚠ ONE REBUILD PER SIZE, EVER, and that bound is the safety. `learned` is set BEFORE the
+-- comparison, so even a height that oscillates cannot make this loop -- it gets one correction
+-- and is then left alone. File scope on purpose: a rebuild recreates every widget, so anything
+-- kept inside the builder would be forgotten exactly when it is needed.
+local pihBoxHeight, pihBoxLearned = {}, {}
+
 -- ============================================================
 -- GLOBAL VIEW (used by Global tab)
 -- ============================================================
@@ -3559,10 +3574,33 @@ S.BuildEffectsTab = function()
             -- which is the cheap failure. Under-shooting still costs an overlap, so the estimate
             -- stays generous.
             local function pihBox(g, text, tone)
-                local h = math.max(28, pihLines(text) * PIH_NOTE_LINE + 22)   -- 13 top + 9 bottom
+                -- Keyed on the text and the width, because those are the two things that decide
+                -- the answer. A translation or a resized panel is simply a key we have not
+                -- learned yet, and it learns that one too.
+                local key = #tostring(text) .. "@" .. math.floor(PIH_NOTE_W)
+                local h = pihBoxHeight[key]
+                    or math.max(28, pihLines(text) * PIH_NOTE_LINE + 22)   -- 13 top + 9 bottom
                 local banner = GUI:CreateInfoBanner(parent, { tone = tone or "info", text = text })
                 banner:SetWidth(PIH_NOTE_W)
                 g:AddWidget(banner, h + 6)
+
+                if pihBoxLearned[key] or not (C_Timer and C_Timer.After) then return end
+                -- 0.05s rather than the next frame: the banner deliberately measures TWICE, the
+                -- second pass a frame after the first, because GetStringHeight can hand back a
+                -- stale single-line value straight after a width change. Reading between the two
+                -- would learn the wrong number and cache it, which is worse than not learning.
+                C_Timer.After(0.05, function()
+                    if pihBoxLearned[key] then return end
+                    if not (banner and banner.IsShown and banner:IsShown()) then return end
+                    local real = banner:GetHeight()
+                    if not real or real <= 0 then return end
+                    pihBoxLearned[key] = true          -- set FIRST: one correction, whatever happens
+                    real = math.ceil(real)
+                    if math.abs(real - h) > 2 then
+                        pihBoxHeight[key] = real
+                        S.SwitchTab("effects")
+                    end
+                end)
             end
 
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
