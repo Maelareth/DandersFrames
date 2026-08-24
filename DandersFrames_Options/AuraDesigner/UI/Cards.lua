@@ -157,6 +157,17 @@ local PIH_EXCLUDE = {
     -- Leaves no visible buff on the paladin -- it shows in logs and nowhere the game can match.
     -- Replaced below by Avenging Wrath, which does.
     [1234189] = true,  -- Execution Sentence
+
+    -- ⚠ THE TEST FOR ALL THREE BELOW: does the spell leave a buff ON THE CASTER? The helper
+    -- matches auras on a unit, so a beam aimed at the ground and an ability that only damages
+    -- the target have nothing for it to find -- they would sit in the list doing nothing for as
+    -- long as it exists. Same reason Execution Sentence went.
+    -- ⚠ Cut deliberately narrowly. Leaving a spell that never fires costs nothing but clutter;
+    -- cutting one that WOULD have fired costs a real infusion window, silently. So only the
+    -- clear cases go, and four newer entries nobody could speak to with confidence stayed in.
+    [202770] = true,   -- Fury of Elune  (Balance druid, a beam on the target area)
+    [357210] = true,   -- Deep Breath    (Evoker movement plus damage, not a burst window)
+    [204066] = true,   -- Lunar Beam     (Guardian druid -- the tank spec -- and a ground effect)
 }
 
 -- ⚠ SPELLS THE CATEGORY MISSES. Avenging Wrath is filed under raidDefensives, which is fair for
