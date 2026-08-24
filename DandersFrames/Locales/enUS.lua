@@ -2836,6 +2836,9 @@ L["Deletes its indicators and its spell lists. Nothing else is touched."] = true
 -- on afterwards, so each label has to stand alone with just the line beneath it for context.
 L["What to Show"] = true
 L["Big cooldown"] = true
+-- How the surface pickers behave. Three things the controls cannot show on their own: which
+-- surfaces stack, which pick one winner, and that an occupied one swaps rather than refuses.
+L["Each signal picks where it draws. Health bar and background can show several things at once; border, name text and health text show only one, so you will be warned if something else already has it. Picking a surface another signal is using swaps the two."] = true
 -- Surface picker. Every surface is listed; one already held by a signal on the same spell list
 -- says what picking it does, because the two trade places rather than one being refused.
 L["%s (swap with %s)"] = true

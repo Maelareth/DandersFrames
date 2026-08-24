@@ -3566,6 +3566,27 @@ S.BuildEffectsTab = function()
                 -- it has nothing to tell. Same converge, different owner.
                 g:AddWidget(GUI:CreateLabel(parent,
                     L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."]))
+
+                -- ☠ THE SURFACE RULES, ONCE, WHERE THE DROPDOWNS ARE. Three facts a reader
+                -- cannot deduce from the controls: that some surfaces show several things at
+                -- once and others pick a single winner, that a warning appears for the second
+                -- kind, and that picking an occupied one swaps rather than refusing. The swap in
+                -- particular is unguessable -- it is the one behaviour here that does something
+                -- to a control the user did not touch, so it has to be stated before it happens.
+                --
+                -- ⚠ INSIDE THE GROUP, which is the whole reason this is a banner at all. Free
+                -- on the column it would measure itself a frame late and land on the box below;
+                -- hosted here the group re-flows around it. Width set before the height is read,
+                -- following the banner call site in Indicators.lua.
+                if P.PIH_Exists() then
+                    local banner = GUI:CreateInfoBanner(parent, {
+                        tone = "info",
+                        text = L["Each signal picks where it draws. Health bar and background can show several things at once; border, name text and health text show only one, so you will be warned if something else already has it. Picking a surface another signal is using swaps the two."],
+                    })
+                    banner:SetWidth((parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24)
+                    g:AddWidget(banner, banner.layoutHeight)
+                end
+
                 signalRow(g, "burst", L["Big cooldown"])
                 signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
                 signalRow(g, "infused", L["Already has active Power Infusion"])
