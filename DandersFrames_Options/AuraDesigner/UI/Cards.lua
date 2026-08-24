@@ -3543,13 +3543,18 @@ S.BuildEffectsTab = function()
                     -- More than one contender: naming only the first would read as "fix this
                     -- one and you are done", which would not be true.
                     if clashes > 1 then who = format(L["%s and %d more"], who, clashes - 1) end
-                    local banner = GUI:CreateInfoBanner(parent, {
-                        tone = "caution",
-                        text = (surface == "border")
-                            and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
-                            or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
-                    })
-                    g:AddWidget(banner, banner.layoutHeight)
+                    -- ⚠ GOLD TEXT RATHER THAN A CAUTION BANNER, for the same reason the note
+                    -- below the rows is a label: a banner starts 34px tall, measures itself a
+                    -- frame later and asks its host to re-flow -- and this column has no reflow
+                    -- seam, so the boxes underneath stay where the old height put them and get
+                    -- landed on. Converted BEFORE it was reported rather than after, because it
+                    -- is the same trap that had already been hit twice in this panel.
+                    -- The caution ACCENT is kept, so the warning still reads as a warning; what
+                    -- is lost is the tinted box around it, and that box is the part that grows.
+                    g:AddWidget(GUI:CreateLabel(parent, (surface == "border")
+                        and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
+                        or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
+                        nil, { r = 1, g = 0.82, b = 0 }))
                 end
             end
 
@@ -3571,28 +3576,29 @@ S.BuildEffectsTab = function()
                 signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
                 signalRow(g, "infused", L["Already has active Power Infusion"])
 
-                -- ☠ THE SURFACE RULES, BELOW THE DROPDOWNS THEY DESCRIBE. Three facts a reader
-                -- cannot deduce from the controls: that some surfaces show several things at
-                -- once and others pick a single winner, that a warning appears for the second
-                -- kind, and that picking an occupied one swaps rather than refusing. The swap in
-                -- particular is unguessable -- it is the one behaviour here that does something
-                -- to a control the user did not touch, so it has to be stated before it happens.
-                -- ⚠ Under the rows, not over them: an explanation of the dropdowns that arrives
-                -- before you have seen one is a glossary, and reads as work to do before the
-                -- controls make sense. User's call, 2026-08-24.
+                -- ☠ A LABEL, NOT AN INFO BANNER, AND THIS IS THE SECOND TIME THE SAME TRAP HAS
+                -- CAUGHT US. A banner starts life 34px tall and measures its real height a frame
+                -- after it draws, then asks its host to re-flow. Inside a settings group the
+                -- GROUP does re-flow -- which is why putting it in one looked like the fix -- but
+                -- the group then asks the COLUMN, and this column publishes no
+                -- `dfAD_ReflowWidgets` seam, so every box below it stays where the old height
+                -- put it. Four lines of prose starting from a 34px estimate is a big enough jump
+                -- to land on the next box: "Trinkets and Potions is being overlapped by What to
+                -- Show", field-reported 2026-08-24.
                 --
-                -- ⚠ INSIDE THE GROUP, which is the whole reason this is a banner at all. Free
-                -- on the column it would measure itself a frame late and land on the box below;
-                -- hosted here the group re-flows around it. Width set before the height is read,
-                -- following the banner call site in Indicators.lua.
-                if P.PIH_Exists() then
-                    local banner = GUI:CreateInfoBanner(parent, {
-                        tone = "info",
-                        text = L["Each one above has a dropdown for where it shows up. The health bar and background can show more than one thing at a time. The border and the two text colours only show one — you will be warned if something else is already using it. Pick a spot another one is using and the two trade places."],
-                    })
-                    banner:SetWidth((parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24)
-                    g:AddWidget(banner, banner.layoutHeight)
-                end
+                -- ⚠ THE DIFFERENCE IS THE SIZE OF THE LIE, not the widget. CreateLabel measures
+                -- itself too, but it starts at 40px, which already covers the two-line notes
+                -- these boxes use -- so its correction is small or zero and nothing visibly
+                -- moves. A banner's is not. Until the column grows a reflow seam (raised with
+                -- Danders), prose here has to be short enough that its first guess is right.
+                --
+                -- ⚠ AND THE TEXT SHRANK FOR THE SAME REASON IT COULD AFFORD TO: two of the three
+                -- facts it carried are already on screen where they matter. The swap is written
+                -- into the dropdown entry itself ("Health Bar (swap with Big cooldown)"), and
+                -- the single-winner warning appears, naming the offender, exactly when it
+                -- applies. Only the stacking rule had nowhere else to live.
+                g:AddWidget(GUI:CreateLabel(parent,
+                    L["The health bar and background can show several things at once. The border and the text colours show only one, so you will be warned if something else is using it."]))
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
