@@ -795,6 +795,23 @@ SlashCmdList["DFPI"] = function(msg)
         :Field("watched spell", PIH_WATCH_ID)
         :Field("driven by", pihManual ~= nil and "HAND (watcher suspended)" or "watcher")
         :Field("sound", pihSoundCfg and (pihSoundCfg.soundLSMKey or "custom") or "silent (none chosen)")
+        -- ☠ RESOLVE IT HERE, because `/dfpi sound <name>` CANNOT check some names at all.
+        -- A LibSharedMedia pack may register a sound whose NAME contains an inline texture
+        -- escape -- SharedMedia_Causese ships one whose name carries the Power Infusion icon.
+        -- Picked from the dropdown it works perfectly: the key is stored verbatim and resolved
+        -- to a file path long before anything reaches the sound API, so the escape never travels.
+        -- But it cannot be TYPED, so the command that was the only way to check a sound resolved
+        -- reported "NOTHING -- bad name" for a name that was entirely valid. Field-found
+        -- 2026-08-24; the instrument was the thing that could not cope, not the feature.
+        :Field("sound resolves to", (function()
+            if not pihSoundCfg then return "n/a" end
+            local p = DF.GetSoundPath and DF:GetSoundPath(pihSoundCfg.soundLSMKey)
+            return tostring(p or pihSoundCfg.soundFile or "NOTHING -- will not play")
+        end)(), (function()
+            if not pihSoundCfg then return "neutral" end
+            local p = DF.GetSoundPath and DF:GetSoundPath(pihSoundCfg.soundLSMKey)
+            return (p or pihSoundCfg.soundFile) and "good" or "bad"
+        end)())
         :Field("roles excluded", (function()
             local r = DF.AuraContainer and DF.AuraContainer.GetHelperExcludedRoles
                 and DF.AuraContainer.GetHelperExcludedRoles()

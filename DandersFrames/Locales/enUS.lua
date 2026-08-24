@@ -2838,9 +2838,6 @@ L["What to Show"] = true
 L["Big cooldown"] = true
 L["Big cooldown with a trinket or potion"] = true
 L["Already has active Power Infusion"] = true
--- Surface picker. A surface another signal already holds stays in the menu, greyed, carrying
--- the reason it cannot be picked -- so the placeholder is the signal's name, not the surface's.
-L["%s (used by %s)"] = true
 -- Clash warnings. Shown only on the three surfaces that take a single winner, and each names
 -- the remedy that already exists rather than describing the problem.
 -- The offender is NAMED: "something else colours the border" sends someone hunting through

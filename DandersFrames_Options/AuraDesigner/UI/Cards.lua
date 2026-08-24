@@ -509,18 +509,24 @@ function P.PIH_SurfaceOptions(key)
     local labels = S.FRAME_LEVEL_LABELS or {}
     local opts = { _order = {} }
     for _, surface in ipairs(PIH_SURFACE_ORDER) do
-        local label = labels[surface] or surface
-        local takenBy = pihSurfaceTakenBy(surface, key)
-        if takenBy then
-            opts[surface] = {
-                text   = format(L["%s (used by %s)"], label, pihLabel(takenBy)),
-                header = true,
-                color  = { r = 0.45, g = 0.45, b = 0.45 },
-            }
-        else
-            opts[surface] = label
+        -- ⚠ A TAKEN SURFACE IS LEFT OUT, NOT GREYED -- and the first attempt at greying it was
+        -- a misuse of somebody else's mechanism. `header = true` is the dropdown's GROUP LABEL
+        -- treatment, not a disabled state: it uppercases the text, shrinks it to 0.85, draws a
+        -- separator above it, and -- the part that gave the game away in testing -- sets a flag
+        -- that INDENTS EVERY ROW BELOW IT. So one unavailable entry turned the rest of the menu
+        -- into its children. The widget has no disabled-row concept at all; `header` is the only
+        -- thing that stops a row being clickable, and it costs all of the above.
+        --
+        -- ☠ Leaving it out is the honest option of the two available. The addon's rule is grey a
+        -- FEATURE TOGGLE'S dependants and hide what does not apply -- and a surface another
+        -- signal is sitting on genuinely does not apply, because a record holds one effect per
+        -- surface. The reason is not lost either: the signal holding it shows that surface in
+        -- its own dropdown, one row up.
+        -- A real disabled row would need the shared widget to grow one, which is Danders' call.
+        if not pihSurfaceTakenBy(surface, key) then
+            opts[surface] = labels[surface] or surface
+            opts._order[#opts._order + 1] = surface
         end
-        opts._order[#opts._order + 1] = surface
     end
     return opts
 end
