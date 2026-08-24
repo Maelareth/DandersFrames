@@ -3450,12 +3450,19 @@ S.BuildEffectsTab = function()
     -- ☠ The card becomes REMOVE once a helper exists on this preset, so there is one place to
     -- look for both. Create and remove are the same feature seen from either side.
     --
-    -- ⚠ NOT ON THE DEBUFFS TAB, and the reason has changed. It used to be that the tab decided
-    -- which pool the recipe wrote into, so Debuffs -- which reads an empty pool but writes into
-    -- the buff one -- could build a second helper over an existing one. The recipe now names its
-    -- pool outright, so that hazard is gone; the guard stays because a helper about buffs has no
-    -- business appearing under a list of debuffs.
-    if select(2, UnitClass("player")) == "PRIEST" and S.activeBuffTab ~= "debuffs" then
+    -- ☠ OTHER BUFFS ONLY, AND THAT IS NOT TIDINESS -- IT IS THE ONLY TAB WHERE IT WORKS.
+    -- The pool a record lives in decides its caster filter before anything else: My Buffs means
+    -- "auras I cast", and poolFilter returns that before it ever consults othersOnly. The helper
+    -- watches OTHER people's cooldowns, so My Buffs is the one place it is guaranteed to match
+    -- nothing. It was addable there and silently did nothing, which is a lying control.
+    --
+    -- ⚠ The recipe already writes into the Other Buffs pool wherever it is invoked from, so this
+    -- is no longer about correctness -- it is about not offering a button whose result lives
+    -- somewhere the user was not looking. Its indicators appear in that tab's list; the card
+    -- should be in the same place as the thing it creates.
+    -- ⭐ And a side benefit the user named: My Buffs is where most people work, and the helper's
+    -- rows would be clutter there for everyone who never uses it.
+    if select(2, UnitClass("player")) == "PRIEST" and S.activeBuffTab == "other" then
         local exists = P.PIH_Exists()
         local pihBlock = GUI:CreateChoiceCardGroup(parent, {
             title    = L["POWER INFUSION HELPER"],
