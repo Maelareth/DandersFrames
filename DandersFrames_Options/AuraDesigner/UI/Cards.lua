@@ -865,20 +865,6 @@ end
 P.PIH_FILTERS = PIH_FILTERS
 P.PIH_SIGNAL_ORDER = PIH_SIGNAL_ORDER
 
--- ☠☠ MEASURED ONCE, THEN REMEMBERED -- because guessing a box's height cannot be got right.
--- Four rounds of this: too tall and the boxes below slid down behind a gap, too short and they
--- were overlapped, and no constant is right at every panel width or in every language. Nothing
--- can be measured at build time either -- CreateLabel's own note records that attempt failing,
--- because nothing has been drawn yet.
---
--- So the box is built with an estimate, asked how tall it actually turned out a moment later,
--- and the answer is kept. The panel rebuilds once with the real number and is exact from then on.
---
--- ⚠ ONE REBUILD PER SIZE, EVER, and that bound is the safety. `learned` is set BEFORE the
--- comparison, so even a height that oscillates cannot make this loop -- it gets one correction
--- and is then left alone. File scope on purpose: a rebuild recreates every widget, so anything
--- kept inside the builder would be forgotten exactly when it is needed.
-local pihBoxHeight, pihBoxLearned = {}, {}
 
 -- ============================================================
 -- GLOBAL VIEW (used by Global tab)
@@ -3573,34 +3559,27 @@ S.BuildEffectsTab = function()
             -- ⚠ Over-shooting the slot now costs a little air BELOW the box, outside its border,
             -- which is the cheap failure. Under-shooting still costs an overlap, so the estimate
             -- stays generous.
+            -- ☠☠ RESERVE TOO MUCH, ON PURPOSE, AND PUT THE BOX LAST. This is the fifth shape
+            -- after four failures, and it is the first one whose WORST CASE is acceptable rather
+            -- than merely unlikely.
+            --
+            -- The four that failed: a box on the column, a box in a group, a pinned guess, and a
+            -- box that measured itself and cached the answer. Three overlapped and one left gaps.
+            -- The measuring one is gone because it regressed -- most likely it read a height
+            -- before the banner had settled and then trusted it, which is worse than a guess,
+            -- because a guess at least errs in a direction you chose.
+            --
+            -- ⭐ What changed is not the estimate, it is WHERE THE ERROR LANDS. The box is now
+            -- the last thing in its group, and the reservation is deliberately a line larger than
+            -- the text should need. So the leftover sits INSIDE the group's own border, under the
+            -- box, at the very bottom -- the least visible place in the panel -- and it can never
+            -- reach the group below. Over-reserving is now the safe direction rather than a
+            -- trade against the opposite bug.
             local function pihBox(g, text, tone)
-                -- Keyed on the text and the width, because those are the two things that decide
-                -- the answer. A translation or a resized panel is simply a key we have not
-                -- learned yet, and it learns that one too.
-                local key = #tostring(text) .. "@" .. math.floor(PIH_NOTE_W)
-                local h = pihBoxHeight[key]
-                    or math.max(28, pihLines(text) * PIH_NOTE_LINE + 22)   -- 13 top + 9 bottom
+                local h = math.max(28, (pihLines(text) + 1) * PIH_NOTE_LINE + 22)  -- 13 top, 9 bottom
                 local banner = GUI:CreateInfoBanner(parent, { tone = tone or "info", text = text })
                 banner:SetWidth(PIH_NOTE_W)
                 g:AddWidget(banner, h + 6)
-
-                if pihBoxLearned[key] or not (C_Timer and C_Timer.After) then return end
-                -- 0.05s rather than the next frame: the banner deliberately measures TWICE, the
-                -- second pass a frame after the first, because GetStringHeight can hand back a
-                -- stale single-line value straight after a width change. Reading between the two
-                -- would learn the wrong number and cache it, which is worse than not learning.
-                C_Timer.After(0.05, function()
-                    if pihBoxLearned[key] then return end
-                    if not (banner and banner.IsShown and banner:IsShown()) then return end
-                    local real = banner:GetHeight()
-                    if not real or real <= 0 then return end
-                    pihBoxLearned[key] = true          -- set FIRST: one correction, whatever happens
-                    real = math.ceil(real)
-                    if math.abs(real - h) > 2 then
-                        pihBoxHeight[key] = real
-                        S.SwitchTab("effects")
-                    end
-                end)
             end
 
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
@@ -3724,6 +3703,24 @@ S.BuildEffectsTab = function()
                 -- codes injected -- which is the addon's rule for exactly this, and why the
                 -- sentence has seven slots rather than fourteen: a translator sees a sentence
                 -- with names to slot in, not a paragraph full of markup.
+
+                -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
+                -- cooldown gates the helper. The machinery is not priest-specific so it was
+                -- easy -- but nobody asked for it, and "which spell hides this" is a question
+                -- about plumbing rather than about the feature. The helper exists to say who is
+                -- worth infusing; it hides when you cannot infuse. One idea, one switch.
+                -- (The capability stays underneath for testing.)
+                --
+                -- ⚠ IT SITS HERE RATHER THAN IN A BOX OF ITS OWN. A whole titled group around a
+                -- single checkbox is more chrome than the setting is worth, and this label says
+                -- what it does without a header to lean on -- which is the test for whether a
+                -- control can live under a heading that does not quite describe it.
+                g:AddWidget(GUI:CreateCheckbox(parent,
+                    L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
+                    function() return P.PIH_Settings().gateEnabled ~= false end,
+                    function(v) P.PIH_SetGateEnabled(v) end))
+
+
                 -- ☠☠ PER WORD, NOT ONCE AROUND THE PHRASE -- and two rounds of "the colour is
                 -- too subtle" were this, not a colour choice.
                 --
@@ -3772,22 +3769,6 @@ S.BuildEffectsTab = function()
                     labels.background or L["Background"],
                     labels.border or L["Border"],
                     L["Text colours"]))
-
-                -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
-                -- cooldown gates the helper. The machinery is not priest-specific so it was
-                -- easy -- but nobody asked for it, and "which spell hides this" is a question
-                -- about plumbing rather than about the feature. The helper exists to say who is
-                -- worth infusing; it hides when you cannot infuse. One idea, one switch.
-                -- (The capability stays underneath for testing.)
-                --
-                -- ⚠ IT SITS HERE RATHER THAN IN A BOX OF ITS OWN. A whole titled group around a
-                -- single checkbox is more chrome than the setting is worth, and this label says
-                -- what it does without a header to lean on -- which is the test for whether a
-                -- control can live under a heading that does not quite describe it.
-                g:AddWidget(GUI:CreateCheckbox(parent,
-                    L["Hide the helper while Power Infusion is on cooldown"], nil, nil, nil,
-                    function() return P.PIH_Settings().gateEnabled ~= false end,
-                    function(v) P.PIH_SetGateEnabled(v) end))
             end)
 
             -- ☠ ONLY WHILE STRONG WINDOW IS ON. These two are what the signal MEANS, so on
