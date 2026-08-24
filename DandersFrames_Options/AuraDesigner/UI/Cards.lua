@@ -3521,7 +3521,11 @@ S.BuildEffectsTab = function()
             local PIH_NOTE_W = (parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24
             local function pihLines(text)
                 local cpl = math.max(20, math.floor(PIH_NOTE_W / 8))
-                return math.max(1, math.ceil(#text / cpl))
+                -- ⚠ Colour escapes are not characters anyone can see. Counting them would add
+                -- twelve bytes per highlighted word and inflate the box by a line or two of pure
+                -- whitespace, which is the fault this estimator exists to avoid.
+                local plain = tostring(text):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+                return math.max(1, math.ceil(#plain / cpl))
             end
             -- ⭐ GUI:CreateNote, not a hand-coloured CreateLabel. It IS the toned-note widget --
             -- a label with the tone's own accent baked in through ToneHex, so a caution note here
@@ -3667,8 +3671,25 @@ S.BuildEffectsTab = function()
                 -- that the box was what broke the layout. It was not -- an unpinned height was --
                 -- so with the height pinned to a realistic number the box is affordable, and so
                 -- is the clause saying what happens when a surface is already taken.
-                pihBox(g,
-                    L["Big cooldown and Big cooldown with a trinket or potion can never share the same display type — pick the one the other is using and they swap. Already has active Power Infusion can share display type with either of them. Health bar and Background can be used by several indicators at once. Border and Text colours can only be used by one indicator at a time."])
+                -- ⭐ THE NAMES ARE THE LABEL KEYS THEMSELVES, not the same words typed again.
+                -- Every highlighted term is the string its own control uses, so renaming a
+                -- signal or a display type carries into this paragraph instead of leaving it
+                -- describing controls that no longer read that way.
+                -- ⚠ And the colour rides OUTSIDE the translated string -- placeholders in, escape
+                -- codes injected -- which is the addon's rule for exactly this, and why the
+                -- sentence has seven slots rather than fourteen: a translator sees a sentence
+                -- with names to slot in, not a paragraph full of markup.
+                local labels = S.FRAME_LEVEL_LABELS or {}
+                local function hi(s) return "|cffffffff" .. tostring(s or "?") .. "|r" end
+                pihBox(g, format(
+                    L["%s and %s can never share the same display type — pick the one the other is using and they swap. %s can share display type with either of them. %s and %s can be used by several indicators at once. %s and %s can only be used by one indicator at a time."],
+                    hi(L["Big cooldown"]),
+                    hi(L["Big cooldown with a trinket or potion"]),
+                    hi(L["Already has active Power Infusion"]),
+                    hi(labels.healthbar or L["Health Bar"]),
+                    hi(labels.background or L["Background"]),
+                    hi(labels.border or L["Border"]),
+                    hi(L["Text colours"])))
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
