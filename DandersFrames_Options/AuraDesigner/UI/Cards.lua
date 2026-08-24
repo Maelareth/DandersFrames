@@ -3502,17 +3502,56 @@ S.BuildEffectsTab = function()
             -- pinned height is the ONLY safe kind of note here, because pinning is what stops the
             -- converge that this column cannot absorb.
             --
-            -- ⚠ Generous by construction. Over-estimating costs a little whitespace;
-            -- under-estimating costs the bug above. The character count is in BYTES, so an em
-            -- dash counts three -- which errs the right way. Delete this the day the column
-            -- publishes a `dfAD_ReflowWidgets` seam (raised with Danders) and not before.
-            local PIH_NOTE_CPL = 38          -- conservative characters per line
-            local PIH_NOTE_LINE = 13         -- one wrapped line
-            local function pihNote(g, text, colour)
+            -- ⚠ AND MEASURING INSTEAD IS NOT AVAILABLE. CreateLabel's own note records the
+            -- attempt: "Do NOT try to Reflow()+Remeasure() synchronously here to get a correct
+            -- height at creation. Tried 2026-08-05 and it does not work: nothing has been drawn
+            -- yet at card build time, so GetStringHeight still returns 0". So the height has to
+            -- be predicted, and the only question is how well.
+            --
+            -- ⚠ DERIVED FROM THE REAL WIDTH, not a constant. The first version used a flat 38
+            -- characters per line "to be safe"; the truth at this panel's width is nearer 68, so
+            -- every note claimed twice the lines it needed and left visible gaps above the first
+            -- tick and below the last note -- field-reported with a screenshot 2026-08-24.
+            -- 8px per character is a shade wider than the font actually renders, so the count
+            -- still errs toward MORE lines, which is the safe direction; and because it reads the
+            -- width, it stays right when the panel is resized rather than only at one size.
+            -- The byte count makes an em dash worth three, which errs the same way.
+            -- Delete all of this the day the column publishes a `dfAD_ReflowWidgets` seam.
+            local PIH_NOTE_LINE = 13
+            local PIH_NOTE_W = (parent:GetWidth() or 320) - (PIH_INDENT + 18) - 24
+            local function pihLines(text)
+                local cpl = math.max(20, math.floor(PIH_NOTE_W / 8))
+                return math.max(1, math.ceil(#text / cpl))
+            end
+            -- ⭐ GUI:CreateNote, not a hand-coloured CreateLabel. It IS the toned-note widget --
+            -- a label with the tone's own accent baked in through ToneHex, so a caution note here
+            -- is the same yellow as every caution note in the addon rather than three numbers
+            -- typed at this call site. `tone` names come from INFO_BANNER_TONES: info, caution,
+            -- danger, success. (The tone adds a colour escape to the string, which the byte count
+            -- below then treats as a dozen characters -- harmless, and it errs long.)
+            local function pihNote(g, text, tone)
                 if not text or text == "" then return end
-                local lines = math.max(1, math.ceil(#text / PIH_NOTE_CPL))
-                g:AddWidget(GUI:CreateLabel(parent, text, nil, colour),
-                    lines * PIH_NOTE_LINE + (GUI.RowHeight.labelPad or 19))
+                local w = tone and GUI:CreateNote(parent, text, { tone = tone })
+                    or GUI:CreateLabel(parent, text)
+                g:AddWidget(w, pihLines(text) * PIH_NOTE_LINE + (GUI.RowHeight.labelPad or 19))
+            end
+
+            -- ⭐ THE TINTED BOX, FOR BOTH TONES. GUI:CreateInfoBanner is the addon's box for this
+            -- in every flavour -- `tone = "caution"` is how the click-casting dialog and the
+            -- profiler raise a warning panel, and there is no separate warning widget. So an
+            -- explanation and a warning here are the same construct with a different tone, which
+            -- is what makes them read as the same language as every other one in the addon.
+            --
+            -- Safe now that the height is pinned to a realistic number. The box was dropped
+            -- earlier on the theory that it was what broke the layout; it was not -- leaving the
+            -- height to settle was. minHeight is passed as well so it cannot shrink under the
+            -- slot from the other direction.
+            local function pihBox(g, text, tone)
+                local h = math.max(28, pihLines(text) * PIH_NOTE_LINE + 22)   -- 13 top + 9 bottom
+                local banner = GUI:CreateInfoBanner(parent,
+                    { tone = tone or "info", text = text, minHeight = h })
+                banner:SetWidth(PIH_NOTE_W)
+                g:AddWidget(banner, h + 6)
             end
 
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
@@ -3574,18 +3613,14 @@ S.BuildEffectsTab = function()
                     -- More than one contender: naming only the first would read as "fix this
                     -- one and you are done", which would not be true.
                     if clashes > 1 then who = format(L["%s and %d more"], who, clashes - 1) end
-                    -- ⚠ GOLD TEXT RATHER THAN A CAUTION BANNER, for the same reason the note
-                    -- below the rows is a label: a banner starts 34px tall, measures itself a
-                    -- frame later and asks its host to re-flow -- and this column has no reflow
-                    -- seam, so the boxes underneath stay where the old height put them and get
-                    -- landed on. Converted BEFORE it was reported rather than after, because it
-                    -- is the same trap that had already been hit twice in this panel.
-                    -- The caution ACCENT is kept, so the warning still reads as a warning; what
-                    -- is lost is the tinted box around it, and that box is the part that grows.
-                    pihNote(g, (surface == "border")
+                    -- A CAUTION BOX, the addon's own construct for a warning panel -- the same
+                    -- one the click-casting dialog and the profiler use. It briefly became gold
+                    -- text on the belief that the box was what broke the layout; it was not, and
+                    -- a warning that looks like every other warning is worth the box.
+                    pihBox(g, (surface == "border")
                         and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
                         or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
-                        { r = 1, g = 0.82, b = 0 })
+                        "caution")
                 end
             end
 
@@ -3628,8 +3663,12 @@ S.BuildEffectsTab = function()
                 -- into the dropdown entry itself ("Health Bar (swap with Big cooldown)"), and
                 -- the single-winner warning appears, naming the offender, exactly when it
                 -- applies. Only the stacking rule had nowhere else to live.
-                pihNote(g,
-                    L["Health bar and background can show several at once. Border and text colours show only one."])
+                -- ⚠ A BOX AGAIN, and the fuller sentence with it. Both were cut on the theory
+                -- that the box was what broke the layout. It was not -- an unpinned height was --
+                -- so with the height pinned to a realistic number the box is affordable, and so
+                -- is the clause saying what happens when a surface is already taken.
+                pihBox(g,
+                    L["Health bar and background can show several at once. Border and text colours show only one, so you will be warned if something else is using it."])
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
