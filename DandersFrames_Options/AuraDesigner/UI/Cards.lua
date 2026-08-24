@@ -3541,46 +3541,26 @@ S.BuildEffectsTab = function()
                 g:AddWidget(w, pihLines(text) * PIH_NOTE_LINE + (GUI.RowHeight.labelPad or 19))
             end
 
-            -- ⭐ THE TINTED BOX, FOR BOTH TONES. GUI:CreateInfoBanner is the addon's box for this
-            -- in every flavour -- `tone = "caution"` is how the click-casting dialog and the
-            -- profiler raise a warning panel, and there is no separate warning widget. So an
-            -- explanation and a warning here are the same construct with a different tone, which
-            -- is what makes them read as the same language as every other one in the addon.
+            -- ☠☠ NOT A BANNER, AND THE REASON IS A RACE RATHER THAN A SIZE.
+            -- Six shapes were tried and the symptom alternated between an overlap and a large
+            -- gap FROM THE SAME BUILD -- "half the time it's overlap, the other half it's a huge
+            -- gap". That is not a wrong constant; a wrong constant is wrong the same way every
+            -- time. It is a timing race, and no number can win one.
             --
-            -- Safe now that the height is pinned to a realistic number. The box was dropped
-            -- earlier on the theory that it was what broke the layout; it was not -- leaving the
-            -- height to settle was. minHeight is passed as well so it cannot shrink under the
-            -- slot from the other direction.
-            -- ☠ NO minHeight. Passing the estimate as a floor was the mistake: it stopped the
-            -- box shrinking to its own text, so every pixel the estimate over-shot became empty
-            -- space INSIDE the border, under the last line. The estimate belongs on the SLOT and
-            -- nowhere else -- the slot is what the column reserves, and the box measures itself
-            -- into it.
-            -- ⚠ Over-shooting the slot now costs a little air BELOW the box, outside its border,
-            -- which is the cheap failure. Under-shooting still costs an overlap, so the estimate
-            -- stays generous.
-            -- ☠☠ RESERVE TOO MUCH, ON PURPOSE, AND PUT THE BOX LAST. This is the fifth shape
-            -- after four failures, and it is the first one whose WORST CASE is acceptable rather
-            -- than merely unlikely.
+            -- ⭐ Verified, and the asymmetry is the whole story: AddWidget stamps
+            -- `_slotHeightExplicit` when a call site pins a height (Sections.lua:125).
+            -- CreateLabel CHECKS it (Sections.lua:479) and skips its re-measure entirely, so a
+            -- pinned label is fixed at build and never corrects itself. CreateInfoBanner never
+            -- checks it -- its DoRecomputeHeight and TriggerHostRelayout run whatever you passed.
+            -- So the box's final height depends on when the panel happened to be built relative
+            -- to the banner's TWO measure passes: before it settles, the column reserved too
+            -- little and the next group is overlapped; after, the group shrinks under a
+            -- reservation already spent and the space becomes a gap.
             --
-            -- The four that failed: a box on the column, a box in a group, a pinned guess, and a
-            -- box that measured itself and cached the answer. Three overlapped and one left gaps.
-            -- The measuring one is gone because it regressed -- most likely it read a height
-            -- before the banner had settled and then trusted it, which is worse than a guess,
-            -- because a guess at least errs in a direction you chose.
-            --
-            -- ⭐ What changed is not the estimate, it is WHERE THE ERROR LANDS. The box is now
-            -- the last thing in its group, and the reservation is deliberately a line larger than
-            -- the text should need. So the leftover sits INSIDE the group's own border, under the
-            -- box, at the very bottom -- the least visible place in the panel -- and it can never
-            -- reach the group below. Over-reserving is now the safe direction rather than a
-            -- trade against the opposite bug.
-            local function pihBox(g, text, tone)
-                local h = math.max(28, (pihLines(text) + 1) * PIH_NOTE_LINE + 22)  -- 13 top, 9 bottom
-                local banner = GUI:CreateInfoBanner(parent, { tone = tone or "info", text = text })
-                banner:SetWidth(PIH_NOTE_W)
-                g:AddWidget(banner, h + 6)
-            end
+            -- ⚠ A box therefore cannot be made deterministic from this side. Getting one back
+            -- means CreateInfoBanner honouring `_slotHeightExplicit` the way CreateLabel does --
+            -- Danders' file, a real request with a checked premise, and NOT the reflow seam we
+            -- nearly asked for and withdrew.
 
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
             -- also appear in Active Indicators: they ARE indicators, and hiding them there
@@ -3645,7 +3625,7 @@ S.BuildEffectsTab = function()
                     -- one the click-casting dialog and the profiler use. It briefly became gold
                     -- text on the belief that the box was what broke the layout; it was not, and
                     -- a warning that looks like every other warning is worth the box.
-                    pihBox(g, (surface == "border")
+                    pihNote(g, (surface == "border")
                         and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
                         or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
                         "caution")
@@ -3760,7 +3740,7 @@ S.BuildEffectsTab = function()
                     end))
                 end
                 local labels = S.FRAME_LEVEL_LABELS or {}
-                pihBox(g, format(
+                pihNote(g, format(
                     L["%s and %s can never share the same display type — pick the one the other is using and they swap. %s can share display type with either of them. %s and %s can be used by several indicators at once. %s and %s can only be used by one indicator at a time."],
                     hi(L["Big cooldown"]),
                     hi(L["Big cooldown with a trinket or potion"]),
