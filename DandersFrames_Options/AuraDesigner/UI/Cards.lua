@@ -234,10 +234,35 @@ end
 -- ─────────────────────────────────────────────────────────────
 -- Scans the WHOLE pool rather than the helper's own records. If a spell list is renamed or
 -- deleted underneath us, our effects must still be findable -- otherwise they become orphans
--- that render nothing and that no control can reach.
+-- ☠☠ THE HELPER LIVES IN THE *OTHER BUFFS* POOL, ALWAYS, AND THE POOL IS NOT A PREFERENCE.
+-- It decides the caster filter before anything else gets a say -- poolFilter returns
+-- "HELPFUL|PLAYER" for a My Buffs record and never reaches the othersOnly branch at all. So a
+-- helper built there asks for "cooldowns cast by ME", and a group member's own cooldown is cast
+-- by THEM. It can never match. The Others Only flag we set on every signal was being overruled
+-- by the pool it happened to be created in.
+--
+-- ⚠ FIELD-FOUND 2026-08-24, AND NOTHING SOLO COULD HAVE CAUGHT IT: with only your own frame on
+-- screen, your own casts DO satisfy "cast by me", and the editor preview draws from config
+-- without applying a pool filter at all -- which is why the border looked right in every solo
+-- pass. It took a Demon Hunter pressing Metamorphosis: sound fired (it registers per unit and
+-- spell, with no pool and no caster filter) while nothing drew.
+--
+-- ⚠ READS take adDB.otherAuras directly and never GetOtherAuras, which CREATES the table --
+-- merely looking at a panel must not write to the profile. WRITES go through the accessor,
+-- which is where lazy creation belongs.
+local function pihOtherPoolRead()
+    local adDB = GetAuraDesignerDB()
+    local pool = adDB and adDB.otherAuras
+    return (type(pool) == "table") and pool or nil
+end
+
+local function pihOtherPoolWrite()
+    return P.GetOtherAuras and P.GetOtherAuras() or nil
+end
+
 local function pihFound()
     local out = {}
-    local pool = CurrentAuraPool()
+    local pool = pihOtherPoolRead()
     if type(pool) ~= "table" then return out end
     local keys = P.FRAME_LEVEL_TYPE_KEYS or {}
     for auraName, auraCfg in pairs(pool) do
@@ -368,13 +393,13 @@ local function pihCreateSignal(key)
     -- ⚠ REFUSE A SURFACE ANOTHER SIGNAL IS SITTING ON. Two effects cannot share one surface on
     -- one record: the second simply replaces the first. Unreachable on the defaults; the guard
     -- is here for 3b, where the user can move a signal.
-    local pool = CurrentAuraPool()
+    local pool = pihOtherPoolRead()
     local occupant = pool and pool[ref] and pool[ref][def.surface]
     if type(occupant) == "table" and occupant.pihSignal and occupant.pihSignal ~= key then
         return false, "that surface is already taken by another signal"
     end
 
-    local cfg = EnsureTypeConfig(ref, def.surface)
+    local cfg = EnsureTypeConfig(ref, def.surface, pihOtherPoolWrite())
     if not cfg then return false, "could not create the effect" end
     -- ☠ THE MARK. This one field is what makes every question above answerable.
     cfg.pihSignal = key
@@ -394,12 +419,19 @@ end
 local function pihDeleteSignal(key)
     local hit = pihFound()[key]
     if not hit then return false end
-    local pool = CurrentAuraPool()
+    local pool = pihOtherPoolRead()
     local auraCfg = pool and pool[hit.auraName]
     if auraCfg then auraCfg[hit.typeKey] = nil end
     -- Drops the record once its last effect is gone -- the same prune the generic delete button
     -- runs, so unticking here and deleting the row there leave the profile identical.
-    if S.CleanupAdHocAura then S.CleanupAdHocAura(hit.auraName) end
+    -- ⚠ NOT S.CleanupAdHocAura. It prunes an emptied record out of `CurrentAuraPool()` -- the
+    -- pool of whichever tab is open -- and ours are always in the Other Buffs pool, so it would
+    -- do nothing whenever the user happened to be on My Buffs. Same rule, same test
+    -- (AuraHoldsNoEffects, its own predicate), applied to the pool the record is actually in.
+    if pool and type(auraCfg) == "table" and P.AuraHoldsNoEffects
+        and P.AuraHoldsNoEffects(auraCfg) then
+        pool[hit.auraName] = nil
+    end
     return true
 end
 
@@ -586,7 +618,7 @@ local function pihCapture(hit)
 end
 
 local function pihPlace(key, auraName, surface, carried)
-    local cfg = EnsureTypeConfig(auraName, surface)
+    local cfg = EnsureTypeConfig(auraName, surface, pihOtherPoolWrite())
     if not cfg then return false end
     cfg.pihSignal  = key
     cfg.label      = pihLabel(key)
@@ -615,7 +647,7 @@ function P.PIH_SetSurface(key, surface)
     if hit.typeKey == surface then return true end
     if not PIH_SIGNALS[key] then return false, "no such signal" end
 
-    local pool = CurrentAuraPool()
+    local pool = pihOtherPoolRead()
     local auraCfg = pool and pool[hit.auraName]
     if not auraCfg then return false, "the record went missing" end
 
@@ -770,7 +802,7 @@ function P.PIH_Create()
 end
 
 function P.PIH_Remove()
-    local pool = CurrentAuraPool()
+    local pool = pihOtherPoolRead()
     local found = pihFound()
     local names, n = {}, 0
     for _, hit in pairs(found) do names[hit.auraName] = true; n = n + 1 end
@@ -3418,9 +3450,11 @@ S.BuildEffectsTab = function()
     -- ☠ The card becomes REMOVE once a helper exists on this preset, so there is one place to
     -- look for both. Create and remove are the same feature seen from either side.
     --
-    -- ⚠ NOT ON THE DEBUFFS TAB. It has no aura pool -- CurrentAuraPool returns the shared empty
-    -- table there while writes still land in the buff pool, so the card would read "add" over a
-    -- helper that already exists and build a second one on the next click.
+    -- ⚠ NOT ON THE DEBUFFS TAB, and the reason has changed. It used to be that the tab decided
+    -- which pool the recipe wrote into, so Debuffs -- which reads an empty pool but writes into
+    -- the buff one -- could build a second helper over an existing one. The recipe now names its
+    -- pool outright, so that hazard is gone; the guard stays because a helper about buffs has no
+    -- business appearing under a list of debuffs.
     if select(2, UnitClass("player")) == "PRIEST" and S.activeBuffTab ~= "debuffs" then
         local exists = P.PIH_Exists()
         local pihBlock = GUI:CreateChoiceCardGroup(parent, {
