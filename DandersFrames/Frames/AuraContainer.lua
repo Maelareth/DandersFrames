@@ -6152,7 +6152,11 @@ function AuraContainer.SetHelperGate(dark)
     for h in pairs(AuraContainer._handles or {}) do
         local b = h and h.backend
         if b and b.applyGroupTuning and not h._destroyed and helperGateHandleIsOurs(h) then
-            local ok = pcall(function() b:applyGroupTuning() end)
+            -- ⚠ pcall(fn, self) not pcall(function() ... end) -- this file's own rule, recorded
+            -- at applyGroupTuning's tail: the closure form allocates one per call for no gain,
+            -- and protection is identical. A gate edge walks every owned handle twice a Power
+            -- Infusion cycle, in combat, so this is exactly the path that rule was written for.
+            local ok = pcall(b.applyGroupTuning, b)
             if ok then n = n + 1 end
         end
     end
