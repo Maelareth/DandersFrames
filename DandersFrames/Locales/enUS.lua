@@ -2836,6 +2836,9 @@ L["Deletes its indicators and its spell lists. Nothing else is touched."] = true
 -- on afterwards, so each label has to stand alone with just the line beneath it for context.
 L["What to Show"] = true
 L["Big cooldown"] = true
+-- Surface picker. Every surface is listed; one already held by a signal on the same spell list
+-- says what picking it does, because the two trade places rather than one being refused.
+L["%s (swap with %s)"] = true
 L["Big cooldown with a trinket or potion"] = true
 L["Already has active Power Infusion"] = true
 -- Clash warnings. Shown only on the three surfaces that take a single winner, and each names

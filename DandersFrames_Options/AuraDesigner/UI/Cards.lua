@@ -487,12 +487,48 @@ end
 -- record holds one effect per surface, so sharing there is an overwrite, not a contest. Infused
 -- is a separate record, so on a contended surface it would win or lose against its own sibling.
 -- Neither is ever what someone meant, so one rule covers both: a surface in use is not offered.
+-- ⚠ ONLY A SIGNAL ON THE *SAME RECORD* BLOCKS A SURFACE, and the first version of this got
+-- that wrong -- it refused ANY signal sharing a surface, which quietly forbade a configuration
+-- that works perfectly.
+--
+-- Burst and strong window live on ONE record, because they share one spell list on purpose. A
+-- record holds one effect per surface, so those two on the same surface is an overwrite: the
+-- second replaces the first and a signal disappears. Genuinely impossible.
+--
+-- ☠ "Already infused" is a DIFFERENT record, and there the answer flips. Two effects on
+-- different records CAN share a health bar or a background -- watched in game 2026-08-23, two
+-- tints on one unit rendered both colours mixed, because collectFrameTints is multi. Blocking
+-- that was us inventing a limit the engine does not have. On border or either text it is a real
+-- contest rather than an impossibility, and a contest is what the clash warning is for.
 local function pihSurfaceTakenBy(surface, exceptKey)
+    local mine = PIH_SIGNALS[exceptKey]
+    if not mine then return nil end
     for key, hit in pairs(pihFound()) do
-        if key ~= exceptKey and hit.typeKey == surface then return key end
+        local other = PIH_SIGNALS[key]
+        if key ~= exceptKey and hit.typeKey == surface and other and other.list == mine.list then
+            return key
+        end
     end
     return nil
 end
+
+-- The same question for the CLASH WARNING, which cares about contention rather than
+-- impossibility: another of our signals, on a different record, on a surface that takes a
+-- single winner. PIH_ClashOn deliberately skips our own effects when counting the user's --
+-- this is what puts the ones that genuinely contend back in.
+local function pihSiblingContends(surface, exceptKey)
+    if not PIH_CONTENDED[surface] then return nil end
+    local mine = PIH_SIGNALS[exceptKey]
+    if not mine then return nil end
+    for key, hit in pairs(pihFound()) do
+        local other = PIH_SIGNALS[key]
+        if key ~= exceptKey and hit.typeKey == surface and other and other.list ~= mine.list then
+            return key
+        end
+    end
+    return nil
+end
+P.PIH_SiblingContends = pihSiblingContends
 
 function P.PIH_SurfaceOf(key)
     local hit = pihFound()[key]
@@ -522,11 +558,14 @@ function P.PIH_SurfaceOptions(key)
         -- signal is sitting on genuinely does not apply, because a record holds one effect per
         -- surface. The reason is not lost either: the signal holding it shows that surface in
         -- its own dropdown, one row up.
-        -- A real disabled row would need the shared widget to grow one, which is Danders' call.
-        if not pihSurfaceTakenBy(surface, key) then
-            opts[surface] = labels[surface] or surface
-            opts._order[#opts._order + 1] = surface
-        end
+        -- ⭐ SO EVERY SURFACE IS LISTED, AND THE OCCUPIED ONE SAYS WHAT PICKING IT DOES.
+        -- Hiding it was the previous answer and the user rejected it for the right reason: a
+        -- missing row reads as "that was never possible", when in fact it is possible and simply
+        -- taken. Naming the swap turns a dead entry into an honest one.
+        local label   = labels[surface] or surface
+        local takenBy = pihSurfaceTakenBy(surface, key)
+        opts[surface] = takenBy and format(L["%s (swap with %s)"], label, pihLabel(takenBy)) or label
+        opts._order[#opts._order + 1] = surface
     end
     return opts
 end
@@ -537,35 +576,67 @@ end
 -- equivalences that do not exist. The colour is the one thing every surface genuinely has, and
 -- it is read from the OLD surface's key and written to the NEW one, because a border keeps its
 -- colour under a different name (see pihColorKey).
-function P.PIH_SetSurface(key, surface)
-    local hit = pihFound()[key]
-    if not hit then return false, "that signal is not on" end
-    if hit.typeKey == surface then return true end
-    if not PIH_SIGNALS[key] then return false, "no such signal" end
-    if pihSurfaceTakenBy(surface, key) then return false, "another signal is already there" end
+-- What travels when a signal moves: its colour and its condition chain, nothing else. Captured
+-- BEFORE anything is deleted, because a swap deletes both effects before rebuilding either.
+local function pihCapture(hit)
+    return {
+        colour     = hit.cfg[pihColorKey(hit.typeKey)],
+        conditions = hit.cfg.conditions,
+    }
+end
 
-    local pool = CurrentAuraPool()
-    local auraCfg = pool and pool[hit.auraName]
-    if not auraCfg then return false, "the record went missing" end
-    -- Somebody else's effect already on that surface of OUR record cannot happen -- the record
-    -- is identified by a helper spell list -- but a stale one of ours could, so refuse rather
-    -- than overwrite something we did not read.
-    if auraCfg[surface] ~= nil then return false, "that surface is occupied" end
-
-    local colour     = hit.cfg[pihColorKey(hit.typeKey)]
-    local conditions = hit.cfg.conditions
-    auraCfg[hit.typeKey] = nil
-
-    local cfg = EnsureTypeConfig(hit.auraName, surface)
-    if not cfg then return false, "could not create the effect" end
+local function pihPlace(key, auraName, surface, carried)
+    local cfg = EnsureTypeConfig(auraName, surface)
+    if not cfg then return false end
     cfg.pihSignal  = key
     cfg.label      = pihLabel(key)
     cfg.othersOnly = true
     cfg.enabled    = true
-    cfg.conditions = conditions
-    if colour then
-        cfg[pihColorKey(surface)] = { r = colour.r, g = colour.g, b = colour.b, a = colour.a or 1 }
+    cfg.conditions = carried and carried.conditions or nil
+    local c = carried and carried.colour
+    if c then cfg[pihColorKey(surface)] = { r = c.r, g = c.g, b = c.b, a = c.a or 1 } end
+    return true
+end
+
+-- ☠ PICKING AN OCCUPIED SURFACE SWAPS THE TWO SIGNALS. Decided with the user 2026-08-24, after
+-- the alternatives were tried and rejected in turn: greying the row misuses the dropdown's group
+-- heading and mangles the menu; hiding it makes a possible thing look impossible and reads as
+-- "you could never have had that"; refusing on click is a control that looks like it works.
+-- Swapping is the only version where every row in the list is a real option and none of them
+-- lies -- and it is almost certainly what someone meant, since they wanted that surface for the
+-- other signal in the first place.
+--
+-- Only ever fires between signals on the SAME record, which is the only case that cannot simply
+-- coexist; see pihSurfaceTakenBy.
+function P.PIH_SetSurface(key, surface)
+    local found = pihFound()
+    local hit = found[key]
+    if not hit then return false, "that signal is not on" end
+    if hit.typeKey == surface then return true end
+    if not PIH_SIGNALS[key] then return false, "no such signal" end
+
+    local pool = CurrentAuraPool()
+    local auraCfg = pool and pool[hit.auraName]
+    if not auraCfg then return false, "the record went missing" end
+
+    local swapKey = pihSurfaceTakenBy(surface, key)
+    local swapHit = swapKey and found[swapKey] or nil
+
+    -- Anything else sitting there is not ours to move. Cannot happen on a record identified by a
+    -- helper spell list, but refusing beats overwriting something we never read.
+    if auraCfg[surface] ~= nil and not swapHit then return false, "that surface is occupied" end
+
+    local mine, theirs = pihCapture(hit), swapHit and pihCapture(swapHit) or nil
+    local vacated = hit.typeKey
+
+    auraCfg[vacated] = nil
+    if swapHit then auraCfg[swapHit.typeKey] = nil end
+
+    if not pihPlace(key, hit.auraName, surface, mine) then
+        return false, "could not create the effect"
     end
+    if swapHit then pihPlace(swapKey, swapHit.auraName, vacated, theirs) end
+
     pihRefresh()
     return true
 end
@@ -3456,6 +3527,17 @@ S.BuildEffectsTab = function()
                 -- It appears only on the three surfaces that actually take a single winner, and
                 -- it names the fix that exists rather than describing the problem.
                 local clashes, who = P.PIH_ClashOn(surface)
+                -- ⚠ OUR OWN SIBLING COUNTS TOO, on a contended surface across records.
+                -- PIH_ClashOn skips anything carrying a helper mark, because two signals on one
+                -- record are prevented outright rather than warned about. "Already infused" is
+                -- on its own record though, so it can genuinely lose a border or a text to one
+                -- of the other two -- a real contest that would otherwise go unwarned precisely
+                -- because it was ours.
+                local sibling = P.PIH_SiblingContends and P.PIH_SiblingContends(surface, key)
+                if sibling then
+                    clashes = clashes + 1
+                    who = who or pihLabel(sibling)
+                end
                 if clashes > 0 then
                     who = who or L["Another effect"]
                     -- More than one contender: naming only the first would read as "fix this
