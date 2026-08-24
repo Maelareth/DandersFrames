@@ -2838,7 +2838,7 @@ L["What to Show"] = true
 L["Big cooldown"] = true
 -- How the surface pickers behave. Three things the controls cannot show on their own: which
 -- surfaces stack, which pick one winner, and that an occupied one swaps rather than refuses.
-L["Health bar and background can show several at once. Border and text colours show only one, so you will be warned if something else is using it."] = true
+L["Big cooldown and Big cooldown with a trinket or potion can never share the same display type — pick the one the other is using and they swap. Already has active Power Infusion can share display type with either of them. Health bar and Background can be used by several indicators at once. Border and Text colours can only be used by one indicator at a time."] = true
 -- Surface picker. Every surface is listed; one already held by a signal on the same spell list
 -- says what picking it does, because the two trade places rather than one being refused.
 L["%s (swap with %s)"] = true

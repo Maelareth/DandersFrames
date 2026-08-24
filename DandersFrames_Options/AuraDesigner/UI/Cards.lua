@@ -3668,7 +3668,7 @@ S.BuildEffectsTab = function()
                 -- so with the height pinned to a realistic number the box is affordable, and so
                 -- is the clause saying what happens when a surface is already taken.
                 pihBox(g,
-                    L["Health bar and background can show several at once. Border and text colours show only one, so you will be warned if something else is using it."])
+                    L["Big cooldown and Big cooldown with a trinket or potion can never share the same display type — pick the one the other is using and they swap. Already has active Power Infusion can share display type with either of them. Health bar and Background can be used by several indicators at once. Border and Text colours can only be used by one indicator at a time."])
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
