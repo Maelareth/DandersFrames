@@ -141,6 +141,65 @@ local PIH_SEED = {
     amplifiers = { potions = "consumables", trinkets = "trinketsItems" },
 }
 
+-- ☠ OUR CURATION, NOT THE DATABASE'S. The category is Danders' and serves his buff bar and his
+-- defensive icon too, so a spell that is wrong FOR US gets dropped here rather than recategorised
+-- there. Anything in this list is a judgement about the Power Infusion helper only.
+-- ⚠ Two of these are arguably miscategorised at source as well. That is a separate, low-priority
+-- report to him and NOT a reason to edit shared data.
+local PIH_EXCLUDE = {
+    -- Augmentation's raid cooldown. It buffs ALLIES rather than the Evoker, so it is not a
+    -- "this player is bursting" signal at all -- the Evoker casting it is enabling everyone
+    -- else. Belongs with the power externals. (User's call, 2026-08-24.)
+    [442204] = true,   -- Breath of Eons
+    -- Brewmaster only. A reasonable entry in a general offensive list and a poor Power Infusion
+    -- trigger: a tank pressing it is not who you are looking for.
+    [325153] = true,   -- Exploding Keg
+    -- Leaves no visible buff on the paladin -- it shows in logs and nowhere the game can match.
+    -- Replaced below by Avenging Wrath, which does.
+    [1234189] = true,  -- Execution Sentence
+}
+
+-- ⚠ SPELLS THE CATEGORY MISSES. Avenging Wrath is filed under raidDefensives, which is fair for
+-- Protection and wrong for Retribution -- it is that spec's burst window and the paladin entry
+-- the helper actually wants. Added by id so the shared categorisation stays untouched.
+local PIH_EXTRA_IDS = {
+    31884,   -- Avenging Wrath (alts 454351 ride along with the record)
+}
+
+-- ⭐ ONE DEFINITION OF WHAT THE HELPER WATCHES. The seeder, the class list and the class ticks
+-- all read this. Four places used to walk the category independently, which is three chances for
+-- a curation change to land in some of them and not the others -- and the class tick reading a
+-- different set from the seeder is exactly the kind of drift nobody notices until a tick stops
+-- clearing itself.
+local function pihSeedRecords()
+    local R = DF.FilterRegistry
+    local out, seen = {}, {}
+    for _, catKey in ipairs(PIH_SEED.cooldowns) do
+        for _, rec in ipairs((R and R.ByCategory and R.ByCategory[catKey]) or {}) do
+            if rec.id and not PIH_EXCLUDE[rec.id] and not seen[rec.id] then
+                seen[rec.id] = true
+                out[#out + 1] = rec
+            end
+        end
+    end
+    for _, id in ipairs(PIH_EXTRA_IDS) do
+        local rec = R and R.ByID and R.ByID[id]
+        if rec and rec.id and not seen[rec.id] then
+            seen[rec.id] = true
+            out[#out + 1] = rec
+        end
+    end
+    return out
+end
+
+-- The same set as flat ids, plus the racials, which is what the seeder wants.
+local function pihSeedIDs()
+    local out = {}
+    for _, rec in ipairs(pihSeedRecords()) do out[#out + 1] = rec.id end
+    for _, id in ipairs(PIH_RACIAL_IDS) do out[#out + 1] = id end
+    return out
+end
+
 -- The three signals, in the order they read on the panel.
 --
 -- ⚠ `surface` is the DEFAULT ONLY. The surface a signal actually occupies is wherever its
@@ -354,7 +413,7 @@ local function pihCreateSignal(key)
 
     local s = P.PIH_Settings()
 
-    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, PIH_SEED.cooldowns, PIH_RACIAL_IDS, true)
+    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, nil, pihSeedIDs(), true)
     if not cdId then return false, "could not build the cooldown list" end
     -- ☠ RECORDED FOR THE RESIDENT HALF, WHICH CANNOT SEE THIS FILE. The sound registrations run
     -- in the always-loaded addon and need this list; they used to find it by NAME and were
@@ -706,10 +765,8 @@ end
 local function pihClassList()
     local R = DF.FilterRegistry
     local present = {}
-    for _, catKey in ipairs(PIH_SEED.cooldowns) do
-        for _, rec in ipairs((R and R.ByCategory and R.ByCategory[catKey]) or {}) do
-            if rec.class and rec.class ~= "ALL" then present[rec.class] = true end
-        end
+    for _, rec in ipairs(pihSeedRecords()) do
+        if rec.class and rec.class ~= "ALL" then present[rec.class] = true end
     end
     local out = {}
     -- The registry's own canonical order, read at call time because SpellPicker.lua loads AFTER
@@ -744,11 +801,9 @@ function P.PIH_ClassOn(classFile)
         end
         return false
     end
-    for _, catKey in ipairs(PIH_SEED.cooldowns) do
-        for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
-            if rec.class == classFile and (f.spells[rec.id] or f.rawIDs[rec.id]) then
-                return true
-            end
+    for _, rec in ipairs(pihSeedRecords()) do
+        if rec.class == classFile and (f.spells[rec.id] or f.rawIDs[rec.id]) then
+            return true
         end
     end
     return false
@@ -769,12 +824,10 @@ local function pihApplyClass(classFile, on)
         end
         return
     end
-    for _, catKey in ipairs(PIH_SEED.cooldowns) do
-        for _, rec in ipairs((R.ByCategory and R.ByCategory[catKey]) or {}) do
-            if rec.class == classFile then
-                if on then R:AddSpellToCustom(id, rec.id)
-                else R:RemoveSpellFromCustom(id, rec.id) end
-            end
+    for _, rec in ipairs(pihSeedRecords()) do
+        if rec.class == classFile then
+            if on then R:AddSpellToCustom(id, rec.id)
+            else R:RemoveSpellFromCustom(id, rec.id) end
         end
     end
 end
