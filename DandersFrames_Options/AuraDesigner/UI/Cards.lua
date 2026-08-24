@@ -3702,7 +3702,16 @@ S.BuildEffectsTab = function()
                 -- ⚠ Only the three indicator names. All seven terms were marked up at one point
                 -- and the paragraph became unreadable: when most of the nouns are picked out,
                 -- nothing is. The display types are short and already capitalised.
-                local EMPH = "ffffffff"   -- naming a control: the binding editor's white
+                -- ⭐ THE BANNER'S OWN ACCENT. FilterRegistry/UI/Options.lua:812 calls ToneHex
+                -- "the sanctioned helper for inline emphasis"; Groups.lua:824 uses ToneHex("info")
+                -- for an inline "(Custom)" tag; and GetToneColor's note says the accent is the value
+                -- "tuned to sit on the banner's own bg". That page rejected it for ITS box because
+                -- it needed buff-vs-debuff CATEGORY colours and a tone hex would have made the
+                -- debuff sentence read as a warning -- we signal no category, and info is the
+                -- neutral tone, so the objection does not reach here.
+                -- ⚠ White was the previous value and is wrong in a banner: the body text is
+                -- already 0.85 white, so it is a 15 per cent lift and reads as unevenness.
+                local EMPH = GUI.ToneHex and GUI:ToneHex("info") or "ff99ccff"
                 local function hi(s)
                     return (tostring(s or "?"):gsub("%S+", function(w)
                         return "|c" .. EMPH .. w .. "|r"
