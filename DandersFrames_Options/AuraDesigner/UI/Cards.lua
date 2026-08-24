@@ -3679,18 +3679,35 @@ S.BuildEffectsTab = function()
                 -- codes injected -- which is the addon's rule for exactly this, and why the
                 -- sentence has seven slots rather than fourteen: a translator sees a sentence
                 -- with names to slot in, not a paragraph full of markup.
-                -- ⚠ THE TONE'S ACCENT, NOT WHITE. White was tried and is nearly invisible here:
-                -- the banner's body text is already 0.85 white, so the emphasis read as
-                -- unevenness rather than as emphasis. GetToneColor's own note says the accent is
-                -- the one "tuned to sit on the banner's own bg", which is exactly this job.
+                -- ☠☠ PER WORD, NOT ONCE AROUND THE PHRASE -- and two rounds of "the colour is
+                -- too subtle" were this, not a colour choice.
                 --
-                -- ☠ AND ONLY THE THREE INDICATOR NAMES. All seven terms were highlighted first
-                -- and the paragraph became unreadable -- when most of the nouns are picked out,
-                -- nothing is. The indicator names are long phrases that are genuinely easy to
-                -- lose mid-sentence ("Big cooldown with a trinket or potion"); the display types
-                -- are short and already capitalised, so they carry themselves.
-                local hex = GUI.ToneHex and GUI:ToneHex("info") or "ffffffff"
-                local function hi(s) return "|c" .. hex .. tostring(s or "?") .. "|r" end
+                -- The banner renders through SetHTML, which splits plain text on SPACES and
+                -- gives every word its own FontString. A |c…|r spanning several words dies at
+                -- the split: the opener lands on the first word, the |r on the last, and every
+                -- word in between falls back to the body grey. So "Big cooldown with a trinket
+                -- or potion" was never a coloured phrase -- it was one coloured word followed by
+                -- six grey ones, which is exactly what "makes very little difference" looks like.
+                -- White got blamed for it, then the info accent got blamed for it. Neither was
+                -- the problem; both were mostly not being applied.
+                --
+                -- ⭐ Documented in FilterRegistry/UI/Options.lua, which hit the identical bug and
+                -- shipped it for a revision: "the banner drew a green 'Buff' beside a grey
+                -- 'Filters' while the popup -- ONE FontString, no splitting -- drew the whole
+                -- phrase green off the identical string." Its conclusion is the rule here:
+                -- "anything that formats text for the banner must do this; a phrase helper that
+                -- wraps once is only ever right by accident, when the phrase happens to be a
+                -- single word."
+                --
+                -- ⚠ Only the three indicator names. All seven terms were marked up at one point
+                -- and the paragraph became unreadable: when most of the nouns are picked out,
+                -- nothing is. The display types are short and already capitalised.
+                local EMPH = "ffffffff"   -- naming a control: the binding editor's white
+                local function hi(s)
+                    return (tostring(s or "?"):gsub("%S+", function(w)
+                        return "|c" .. EMPH .. w .. "|r"
+                    end))
+                end
                 local labels = S.FRAME_LEVEL_LABELS or {}
                 pihBox(g, format(
                     L["%s and %s can never share the same display type — pick the one the other is using and they swap. %s can share display type with either of them. %s and %s can be used by several indicators at once. %s and %s can only be used by one indicator at a time."],
