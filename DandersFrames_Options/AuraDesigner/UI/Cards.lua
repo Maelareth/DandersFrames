@@ -3484,6 +3484,37 @@ S.BuildEffectsTab = function()
                 yPos = yPos - (h + GUI.Space.section)
             end
 
+            -- ☠☠ EVERY NOTE IN THIS COLUMN TAKES AN EXPLICIT HEIGHT, which inverts CreateLabel's
+            -- usual advice on purpose -- and getting that inversion wrong cost three rounds of
+            -- the user's time, so here is the whole mechanism.
+            --
+            -- A label builds itself 380px wide, measures, and gets a ONE-LINE answer. The group
+            -- then narrows it to the real width and the text wraps to three or four lines. The
+            -- label notices and fires a correction -- but only when the call site left the height
+            -- alone, and that correction re-flows the GROUP, then asks the COLUMN, which stacks
+            -- its children at fixed offsets and does nothing. So the group keeps the one-line
+            -- height, the label spills out of its bottom edge, and the next box is drawn on top
+            -- of it. That is how the note went "missing" and the boxes overlapped in the same
+            -- breath: the same fault, seen from two ends.
+            --
+            -- ⭐ CreateLabel's own comment names the escape hatch without calling it one: labels
+            -- "with a call-site height are exactly the ones nothing else ever touches again". A
+            -- pinned height is the ONLY safe kind of note here, because pinning is what stops the
+            -- converge that this column cannot absorb.
+            --
+            -- ⚠ Generous by construction. Over-estimating costs a little whitespace;
+            -- under-estimating costs the bug above. The character count is in BYTES, so an em
+            -- dash counts three -- which errs the right way. Delete this the day the column
+            -- publishes a `dfAD_ReflowWidgets` seam (raised with Danders) and not before.
+            local PIH_NOTE_CPL = 38          -- conservative characters per line
+            local PIH_NOTE_LINE = 13         -- one wrapped line
+            local function pihNote(g, text, colour)
+                if not text or text == "" then return end
+                local lines = math.max(1, math.ceil(#text / PIH_NOTE_CPL))
+                g:AddWidget(GUI:CreateLabel(parent, text, nil, colour),
+                    lines * PIH_NOTE_LINE + (GUI.RowHeight.labelPad or 19))
+            end
+
             -- Each tick creates or deletes one ordinary effect, which is why the rows below
             -- also appear in Active Indicators: they ARE indicators, and hiding them there
             -- would mean a row you can see the colour of but cannot find.
@@ -3498,7 +3529,7 @@ S.BuildEffectsTab = function()
                 -- space by saying something the tick cannot; "Already has active Power Infusion"
                 -- says the whole thing on its own, so a gloss beneath it is just the label again
                 -- in different words.
-                if desc then g:AddWidget(GUI:CreateLabel(parent, desc)) end
+                if desc then pihNote(g, desc) end
 
                 -- The surface picker, and it only exists while the signal does: "where does
                 -- this draw" is not a question about a signal that draws nothing.
@@ -3551,10 +3582,10 @@ S.BuildEffectsTab = function()
                     -- is the same trap that had already been hit twice in this panel.
                     -- The caution ACCENT is kept, so the warning still reads as a warning; what
                     -- is lost is the tinted box around it, and that box is the part that grows.
-                    g:AddWidget(GUI:CreateLabel(parent, (surface == "border")
+                    pihNote(g, (surface == "border")
                         and format(L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."], who)
                         or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
-                        nil, { r = 1, g = 0.82, b = 0 }))
+                        { r = 1, g = 0.82, b = 0 })
                 end
             end
 
@@ -3569,8 +3600,8 @@ S.BuildEffectsTab = function()
                 -- a seam the indicator cards publish and this column does not.
                 -- ⚠ Inside a group, a measured label re-flows its host and settles. Outside one
                 -- it has nothing to tell. Same converge, different owner.
-                g:AddWidget(GUI:CreateLabel(parent,
-                    L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."]))
+                pihNote(g,
+                    L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."])
 
                 signalRow(g, "burst", L["Big cooldown"])
                 signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
@@ -3597,8 +3628,8 @@ S.BuildEffectsTab = function()
                 -- into the dropdown entry itself ("Health Bar (swap with Big cooldown)"), and
                 -- the single-winner warning appears, naming the offender, exactly when it
                 -- applies. Only the stacking rule had nowhere else to live.
-                g:AddWidget(GUI:CreateLabel(parent,
-                    L["The health bar and background can show several things at once. The border and the text colours show only one, so you will be warned if something else is using it."]))
+                pihNote(g,
+                    L["Health bar and background can show several at once. Border and text colours show only one."])
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
@@ -3646,8 +3677,8 @@ S.BuildEffectsTab = function()
                 g:AddWidget(GUI:CreateCheckbox(parent, L["Healers"], nil, nil, nil,
                     function() return (P.PIH_Settings().roles or {}).HEALER == true end,
                     function(v) P.PIH_SetRole("HEALER", v) end))
-                g:AddWidget(GUI:CreateLabel(parent,
-                    L["Only applies when the group has roles."]))
+                pihNote(g,
+                    L["Only applies when the group has roles."])
             end)
 
             -- ☠ COLLAPSIBLE, AND THIRTEEN ROWS IS WHY. Everything else in this panel is two or
@@ -3659,7 +3690,7 @@ S.BuildEffectsTab = function()
                 -- underneath is a line nobody reads -- it arrives after the reader has already
                 -- decided what the box does. The one sentence that explains the box goes where
                 -- the reader still needs it.
-                g:AddWidget(GUI:CreateLabel(parent, L["Untick a class to ignore its cooldowns."]))
+                pihNote(g, L["Untick a class to ignore its cooldowns."])
 
                 -- ☠ ABOVE THE LIST, NOT UNDER IT. Fourteen ticks is far enough that a button at
                 -- the bottom is a button nobody scrolls to -- and this is the escape hatch for
@@ -3670,8 +3701,8 @@ S.BuildEffectsTab = function()
                 -- scrolls to this filter, selects it and pulses it. Its own comment records why:
                 -- the hand-written version "landed you on the page with nothing indicated, which
                 -- is indistinguishable from a broken link" -- which is exactly what was here.
-                g:AddWidget(GUI:CreateLabel(parent,
-                    L["To add or remove single spells, open the list itself."]))
+                pihNote(g,
+                    L["To add or remove single spells, open the list itself."])
                 local cfID = P.PIH_CooldownFilterID and P.PIH_CooldownFilterID()
                 local fdBtn = GUI:CreateButton(parent, L["Filter Designer"], 140, 22, function()
                     GUI:OpenFilterInDesigner("custom", cfID)
@@ -3724,8 +3755,8 @@ S.BuildEffectsTab = function()
                     -- ⚠ Stated rather than discovered in a fight: sound rides the same gate as
                     -- the visuals, and it announces new windows only -- a window already open
                     -- when the gate re-opens stays silent, because the visuals already carry it.
-                    g:AddWidget(GUI:CreateLabel(parent,
-                        L["Only plays while your Power Infusion is ready."]))
+                    pihNote(g,
+                        L["Only plays while your Power Infusion is ready."])
                 end
             end)
 

@@ -2838,7 +2838,7 @@ L["What to Show"] = true
 L["Big cooldown"] = true
 -- How the surface pickers behave. Three things the controls cannot show on their own: which
 -- surfaces stack, which pick one winner, and that an occupied one swaps rather than refuses.
-L["The health bar and background can show several things at once. The border and the text colours show only one, so you will be warned if something else is using it."] = true
+L["Health bar and background can show several at once. Border and text colours show only one."] = true
 -- Surface picker. Every surface is listed; one already held by a signal on the same spell list
 -- says what picking it does, because the two trade places rather than one being refused.
 L["%s (swap with %s)"] = true
