@@ -3679,17 +3679,28 @@ S.BuildEffectsTab = function()
                 -- codes injected -- which is the addon's rule for exactly this, and why the
                 -- sentence has seven slots rather than fourteen: a translator sees a sentence
                 -- with names to slot in, not a paragraph full of markup.
+                -- ⚠ THE TONE'S ACCENT, NOT WHITE. White was tried and is nearly invisible here:
+                -- the banner's body text is already 0.85 white, so the emphasis read as
+                -- unevenness rather than as emphasis. GetToneColor's own note says the accent is
+                -- the one "tuned to sit on the banner's own bg", which is exactly this job.
+                --
+                -- ☠ AND ONLY THE THREE INDICATOR NAMES. All seven terms were highlighted first
+                -- and the paragraph became unreadable -- when most of the nouns are picked out,
+                -- nothing is. The indicator names are long phrases that are genuinely easy to
+                -- lose mid-sentence ("Big cooldown with a trinket or potion"); the display types
+                -- are short and already capitalised, so they carry themselves.
+                local hex = GUI.ToneHex and GUI:ToneHex("info") or "ffffffff"
+                local function hi(s) return "|c" .. hex .. tostring(s or "?") .. "|r" end
                 local labels = S.FRAME_LEVEL_LABELS or {}
-                local function hi(s) return "|cffffffff" .. tostring(s or "?") .. "|r" end
                 pihBox(g, format(
                     L["%s and %s can never share the same display type — pick the one the other is using and they swap. %s can share display type with either of them. %s and %s can be used by several indicators at once. %s and %s can only be used by one indicator at a time."],
                     hi(L["Big cooldown"]),
                     hi(L["Big cooldown with a trinket or potion"]),
                     hi(L["Already has active Power Infusion"]),
-                    hi(labels.healthbar or L["Health Bar"]),
-                    hi(labels.background or L["Background"]),
-                    hi(labels.border or L["Border"]),
-                    hi(L["Text colours"])))
+                    labels.healthbar or L["Health Bar"],
+                    labels.background or L["Background"],
+                    labels.border or L["Border"],
+                    L["Text colours"]))
 
                 -- ☠ A TOGGLE, NOT A SPELL PICKER. An earlier pass let the user choose which
                 -- cooldown gates the helper. The machinery is not priest-specific so it was
