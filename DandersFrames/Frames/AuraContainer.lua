@@ -747,9 +747,29 @@ function AuraContainer.GetHelperSentinel() return HELPER_GATE_SENTINEL end
 -- Unfixable for other players -- their spec is secret in 12.1.
 local helperExcludedRoles = nil   -- e.g. { TANK = true, HEALER = true }
 
+-- ⭐ THE PLAYER'S OWN ROLE COMES FROM THEIR SPEC, EVERYONE ELSE'S FROM THE GROUP.
+-- `UnitGroupRolesAssigned` reports the role the group was FORMED with, so it goes stale after a
+-- mid-run respec until the group re-forms -- a healer who switched to damage still reads HEALER
+-- and the helper would keep skipping them.
+--
+-- ☠ FIXED HERE, NOT IN DF:GetUnitRole. Danders' ruling, 2026-08-23: that function serves every
+-- consumer in the addon, and reordering its preference would change behaviour everywhere to fix
+-- a case that only bites the local player after a respec without a regroup. Wide blast radius,
+-- narrow win, and not this feature's change to make. So the helper prefers the better answer for
+-- the one unit it can get it for, and leaves the shared function alone. If the flip is ever
+-- right addon-wide it should be its own change with its own testing, not a passenger on ours.
+local function helperUnitRole(unit)
+    if UnitIsUnit and UnitIsUnit(unit, "player") and GetSpecialization and GetSpecializationRole then
+        local spec = GetSpecialization()
+        local role = spec and GetSpecializationRole(spec)
+        if role and role ~= "NONE" then return role end
+    end
+    return DF.GetUnitRole and DF:GetUnitRole(unit)
+end
+
 local function helperRoleExcluded(unit)
     if not (helperExcludedRoles and unit) then return false end
-    local role = DF.GetUnitRole and DF:GetUnitRole(unit)
+    local role = helperUnitRole(unit)
     if not role or role == "NONE" then return false end   -- fail open
     return helperExcludedRoles[role] == true
 end

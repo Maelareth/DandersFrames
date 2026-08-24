@@ -498,6 +498,23 @@ local function resolveConditions(spec, typeCfg, isSpecPool)
         if type(g) ~= "table" or type(g.triggers) ~= "table" then return nil end
         if #g.triggers > 0 then groups[#groups + 1] = g end
     end
+    -- ☠ RETURNING nil HERE MEANS "NO CHAIN", WHICH MEANS THE EFFECT RENDERS AS A PLAIN UNION.
+    -- Correct for a hand-edited effect: one group is just a union, and the user sees what they
+    -- built. It is a trap for anything BUILDING CHAINS PROGRAMMATICALLY, because the two ways of
+    -- reaching this line look nothing alike from the caller's side:
+    --   * two groups, both populated        -> a chain, as asked for
+    --   * two groups, one of them EMPTIED   -> skipped above, count drops to one, and the effect
+    --                                          silently becomes a DUPLICATE of the simpler signal
+    --                                          it was meant to narrow -- same trigger, same
+    --                                          behaviour, two effects contending over a surface.
+    -- The failure reads as a rendering bug (why are these two identical?) rather than as a
+    -- config one, which is where the time goes.
+    -- ⚠ The Power Infusion helper met this in slice 3a: its "cooldown AND (potion OR trinket)"
+    -- signal has an amplifier group that empties when the user unticks both. The guard that
+    -- works is at the CALLER -- do not create the effect at all while a group would be empty --
+    -- because that is the only place that knows an empty group was a choice rather than a
+    -- half-finished edit. Comment requested by Danders, 2026-08-23, so the next caller meets
+    -- this as documentation instead of as a symptom.
     if #groups < 2 then return nil end   -- one group is just a plain union
 
     if c.mode == "ALL" then

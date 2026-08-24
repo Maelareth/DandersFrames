@@ -288,10 +288,54 @@ end
 -- ⇒ SO THIS IS ONLY EVER USED FOR "IS IT READY AGAIN", NEVER FOR "HAS IT JUST GONE DOWN".
 -- Opening on `not isActive` is safe: the GCD lapsing and the real cooldown ending both mean
 -- genuinely ready. Shutting is driven by the CAST instead -- see the watcher below.
+-- Longest global cooldown the game hands out. Only reached by the fallback below, where there
+-- is no clean flag to read and a duration is the only thing left to judge by.
+local PIH_GCD_MAX = 1.55
+
+-- ⭐⭐ A REAL COOLDOWN IS `isActive` AND NOT `isOnGCD`. Danders' answer to our GCD finding
+-- (2026-08-23), and it replaces the workaround rather than sitting beside it: `isActive` alone
+-- reads true for EVERY spell while the global cooldown runs, so the helper blinked off whenever
+-- the player cast anything. `isOnGCD` is the sibling flag that says which of the two it is, and
+-- both stay readable in combat while startTime / duration / modRate seal.
+--
+-- ⚠ Shape copied from DandersCDM's `ClassifyCooldown` (Display/CooldownBar.lua), which credits
+-- Ellesmere's hooks for the same discriminator -- "no duration/magnitude math, only the clean
+-- bool flags". ☠ WE COULD NOT READ THAT FUNCTION: DandersCDM is not installed on this machine,
+-- so this is built from Danders' description of it, not copied from it. He has been asked to
+-- paste it so the three branches below can be checked against the original rather than against
+-- a paraphrase.
+--
+-- Two things the flags cannot always give us, and both fall back to a duration test:
+--   * `isOnGCD` can come back SECRET -- guarded, never compared.
+--   * A client whose info table has no `isOnGCD` at all.
+-- The fallback asks "is this longer than any global cooldown", which is the same question with
+-- worse evidence; it is only reached when the good evidence is unavailable.
+--
+-- ⚠ CHARGES. A spell with a charge in hand reads not-active, or active + isOnGCD during the
+-- global; at zero charges it reads active and NOT on GCD -- which is exactly the "genuinely on
+-- cooldown" verdict, so charge spells work without special handling here. What they DO need is
+-- SPELL_UPDATE_CHARGES registered alongside SPELL_UPDATE_COOLDOWN, or a charge coming back fires
+-- no event at all. Registered with the watcher rather than here.
 local function pihReadReady()
     local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(PI_SPELL_ID)
     if not info then return true end
-    return info.isActive ~= true
+    if info.isActive ~= true then return true end
+
+    local gcd = info.isOnGCD
+    local sealed = issecretvalue and issecretvalue(gcd)
+    if gcd ~= nil and not sealed then
+        -- Active AND merely the global cooldown = not a real cooldown = still ready.
+        return gcd == true
+    end
+
+    -- No usable flag. A duration inside one global cooldown is a global cooldown.
+    local dur = info.duration
+    if dur ~= nil and not (issecretvalue and issecretvalue(dur)) then
+        return dur <= PIH_GCD_MAX
+    end
+    -- Nothing readable either way. Treat as on cooldown: the failure we can afford is a helper
+    -- that hides when it did not have to, not one that marks people we cannot infuse.
+    return false
 end
 
 local pihReadyTicker
@@ -418,6 +462,12 @@ end
 -- never lapses and therefore looks exactly like a real cooldown.
 local pihWatcher = CreateFrame("Frame")
 pihWatcher:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+-- ⚠ CHARGES FIRE THEIR OWN EVENT. A charge returning is a spell becoming usable again, and
+-- SPELL_UPDATE_COOLDOWN does not fire for it -- so a charge-based gate spell would come back
+-- ready with nothing to tell us. Power Infusion has no charges today; this is registered
+-- because the gate spell is configurable and the failure would be silent. Danders' own cooldown
+-- addon registers the pair for the same reason.
+pihWatcher:RegisterEvent("SPELL_UPDATE_CHARGES")
 pihWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
 pihWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
@@ -444,8 +494,12 @@ pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
         return
     end
 
-    -- SPELL_UPDATE_COOLDOWN: OPENING ONLY. Fires on every global cooldown, so it must never be
-    -- allowed to shut anything -- that is the bug this whole block exists for.
+    -- SPELL_UPDATE_COOLDOWN / SPELL_UPDATE_CHARGES: OPENING ONLY, still.
+    -- ⚠ pihReadReady can now tell a real cooldown from a global one, so this COULD shut the gate
+    -- as well. It deliberately does not. The cast event shuts on an unambiguous fact -- the
+    -- player pressed it -- where shutting from here would mean trusting a flag read at whatever
+    -- instant a chatty event happened to fire. One shut path, one open path, and the read that
+    -- was wrong before is only used where a wrong answer cannot shut anything.
     local ready = pihReadReady()
     if not ready then return end
     if pihGateOpen then return end
