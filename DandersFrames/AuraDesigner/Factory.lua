@@ -4275,6 +4275,15 @@ function Factory:SetHelperSoundsArmed(frame, armed, map, cfg)
     -- Power Infusion back onto the priest.
     if UnitIsUnit(frame.unit, "player") then return 0, "own unit (never registered, by design)" end
 
+    -- ☠ ROLE EXCLUSION HOLDS HERE TOO. The visual gate skips excluded roles at the
+    -- container funnel, which sound never passes through -- without this, a tank's cooldown
+    -- played the cue while nothing marked them: a signal with nobody to act on. Checked at
+    -- arm time, the same staleness window as everything else on this path.
+    if DF.AuraContainer and DF.AuraContainer.IsHelperRoleExcluded
+        and DF.AuraContainer.IsHelperRoleExcluded(frame.unit) then
+        return 0, "role excluded"
+    end
+
     local argKey, argVal = resolveSoundArg(cfg or {})
     if not argKey then return 0, "sound name did not resolve" end
 
@@ -5825,12 +5834,16 @@ function Factory:SyncFrame(frame)
                     syncConditionChain(st, bestName, frame, frame.unit, chainTX, filt,
                         "mirrorhost", colSig(bestCfg.color),
                         function(map, f)
-                            return buildMirrorHostConfig(frame.unit, map, function(host)
+                            -- stampGate: the chain's final visual is a container like any
+                            -- other. Its four sibling consumers stamp; this one unstamped
+                            -- left a helper signal moved onto a text surface permanently
+                            -- exempt from the gate.
+                            return stampGate(buildMirrorHostConfig(frame.unit, map, function(host)
                                 local e = st[bestName]
                                 if e then e.host = host end
                                 st._lastHost = host
                                 TDRender:EnableMirrors(frame, cat, host, color)
-                            end, f)
+                            end, f), bestCfg)
                         end,
                         -- A colour edit re-registers on the stashed host; EnableMirrors is
                         -- idempotent per parent and restamps the colour.

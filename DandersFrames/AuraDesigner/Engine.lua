@@ -11,6 +11,12 @@ local addonName, DF = ...
 
 local wipe = table.wipe
 
+-- Hot-path globals, cached once: the cooldown watcher and its ticker read these on every
+-- event and every tick, all fight long.
+local C_Spell = C_Spell
+local C_Timer = C_Timer
+local issecretvalue = issecretvalue
+
 
 
 DF.AuraDesigner = DF.AuraDesigner or {}
@@ -171,7 +177,12 @@ local function pihSettings()
     for _, mode in ipairs(PIH_MODES) do
         local adDB = DF:GetModeBaseAuraDesigner(mode)
         local s = adDB and adDB.pihelper
-        if s then return s end
+        -- ☠ A pihelper TABLE ALONE IS NOT A HELPER. Remove leaves the table behind on
+        -- purpose (behaviour survives a remove), so a preset that ONCE had a helper would
+        -- otherwise shadow the preset that has one now -- settings configured in raid mode
+        -- reverting to party leftovers on every reload. The recorded list id only exists
+        -- while a helper is actually installed, so it is the installed test.
+        if s and s.cooldownFilterID then return s end
     end
     return nil
 end
@@ -199,24 +210,25 @@ local function pihResolvedMap()
 end
 
 -- Arm or disarm helper sound on every AD frame. Mirrors the visual gate: closed = silent.
+-- ☠ SKIPS THE RESOLVE WHEN NOTHING COULD PLAY. With no sound chosen -- the shipped
+-- default -- arming would resolve the whole spell list and walk every frame just to register
+-- nothing. The DISARM pass still walks: teardown is the thing that actually silences.
 local function pihSoundsArmed(armed)
     local Factory = DF.AuraDesigner and DF.AuraDesigner.Factory
-    if not (Factory and Factory.SetHelperSoundsArmed) then return 0, {}, 0 end
+    if not (Factory and Factory.SetHelperSoundsArmed) then return 0 end
+    if armed and not pihSoundCfg then armed = false end
     local map = armed and pihResolvedMap() or nil
-    local n, reasons, frames = 0, {}, 0
+    local n = 0
     local function visit(frame)
         if frame and DF:IsAuraDesignerEnabled(frame) then
-            frames = frames + 1
-            local got, why = Factory:SetHelperSoundsArmed(frame, armed, map, pihSoundCfg)
+            local got = Factory:SetHelperSoundsArmed(frame, armed, map, pihSoundCfg)
             n = n + (got or 0)
-            why = why or "?"
-            reasons[why] = (reasons[why] or 0) + 1
         end
     end
     if DF.IteratePartyFrames  then DF:IteratePartyFrames(visit)  end
     if DF.IterateRaidFrames   then DF:IterateRaidFrames(visit)   end
     if DF.IteratePinnedFrames then DF.IteratePinnedFrames(visit) end
-    return n, reasons, frames
+    return n
 end
 
 -- Flip the gate. ☠ No early return on an unchanged state: our variable records INTENT, never
@@ -328,7 +340,10 @@ local function pihSet(dark)
     pihSoundsArmed(not dark)
 
     if dark then
-        if not pihReadyTicker and C_Timer and C_Timer.NewTicker then
+        -- ⚠ Never under a manual hold: the tick body refuses to act while held (below),
+        -- so a ticker started here would idle at 2 Hz for the rest of the session. Handing
+        -- control back re-enters through pihSet and starts it then, if still dark.
+        if not pihReadyTicker and pihManual == nil and C_Timer and C_Timer.NewTicker then
             pihReadyTicker = C_Timer.NewTicker(0.5, function()
                 -- Held by hand: never fight a gate the user is holding themselves.
                 if pihManual ~= nil then return end
@@ -343,8 +358,6 @@ local function pihSet(dark)
     end
     return n
 end
-
-function Engine:PIH_SetGateOpen(open) return pihSet(not open) end
 
 -- ☠ THE GATE CAN BE SWITCHED OFF ENTIRELY. "Hide while Power Infusion is on cooldown" is the
 -- whole point of the helper, so it defaults on -- but someone who just wants to see burst
@@ -361,17 +374,19 @@ function Engine:PIH_SetGateEnabled(on)
         pihManual = nil
         pihSet(false)          -- open, and nothing will shut it
     else
+        -- ⚠ Re-enabling releases a manual hold too. Without this, "gate enabled" and
+        -- "held by hand" could both be true at once, with the watcher suspended and nothing
+        -- on screen to say so.
+        pihManual = nil
         local ready = pihReadReady()
         pihSet(not ready)      -- resume from the real cooldown state
     end
     return pihGateEnabled
 end
 
-function Engine:PIH_IsGateEnabled() return pihGateEnabled end
-
--- ☠ THE SOUND CHOICE HAS TO BE APPLIED, NOT MERELY STORED. Until now it lived only in the
--- file-local above, which is gone on the next reload -- and PIH_ApplySaved
--- never armed sound at all, so a player who picked one and logged out had picked nothing.
+-- ☠ THE SOUND CHOICE HAS TO BE APPLIED, NOT MERELY STORED. An early version kept it
+-- only in the file-local above, which dies on reload, and the login path never armed it -- a
+-- player who picked a sound and logged out had picked nothing.
 -- The panel saves the key with the helper's other settings; this is the one place that turns a
 -- saved key into live registrations, and it is called from both the panel and the login path.
 -- An empty or missing key means SILENT: no sound was ever a default, and an audio cue nobody
@@ -389,11 +404,28 @@ end
 -- would silently not apply to a player who never opens their settings -- which is most of
 -- them, most of the time. §1b's whole point.
 --
--- Reads the party preset: the helper is per-preset (§2), and a party/raid split sharing one
--- preset shares the helper, which is the addon's model for every other effect.
+-- Reads whichever preset actually has a helper installed, party first (see pihSettings); a
+-- party/raid split sharing one preset shares the helper, which is the addon's model for
+-- every other effect.
+--
+-- ☠ ALSO THE RESET PATH. Called on login AND after a profile switch, and the new
+-- profile may have no helper -- in which case everything the old one pushed must come back
+-- out: roles, the gate, and above all the sound registrations, which would otherwise keep
+-- playing for a helper that no longer exists anywhere.
+local pihSyncWatcher   -- defined beside the watcher below; registration follows helper existence
 function Engine:PIH_ApplySaved()
     local s = pihSettings()
-    if not s then return false end
+    if not s then
+        if DF.AuraContainer and DF.AuraContainer.SetHelperExcludedRoles then
+            DF.AuraContainer.SetHelperExcludedRoles(nil)
+        end
+        pihManual = nil
+        pihGateEnabled = true
+        Engine:PIH_SetSound(nil)   -- tears down every live registration
+        pihSet(false)              -- open; nothing is left to hide
+        if pihSyncWatcher then pihSyncWatcher() end
+        return false
+    end
 
     if DF.AuraContainer and DF.AuraContainer.SetHelperExcludedRoles then
         local any = false
@@ -404,8 +436,13 @@ function Engine:PIH_ApplySaved()
     -- After the gate, never before: SetSound arms against the gate's current state, so calling
     -- it first would arm against the state we are about to leave.
     Engine:PIH_SetSound(s.soundOn and s.soundLSMKey or nil)
+    if pihSyncWatcher then pihSyncWatcher() end
     return true
 end
+
+-- Public seam for the panel: create, remove and apply all change whether a helper exists,
+-- which is what decides the watcher's registrations.
+function Engine:PIH_SyncWatcher() if pihSyncWatcher then pihSyncWatcher() end end
 
 
 -- ☠ SHUT ON THE CAST, OPEN ON THE COOLDOWN CLEARING.
@@ -419,18 +456,63 @@ end
 -- any GCD). Simpler, no new events -- and it breaks under sustained casting, where the GCD
 -- never lapses and therefore looks exactly like a real cooldown.
 local pihWatcher = CreateFrame("Frame")
-pihWatcher:RegisterEvent("SPELL_UPDATE_COOLDOWN")
--- ⚠ CHARGES FIRE THEIR OWN EVENT. A charge returning is a spell becoming usable again, and
--- SPELL_UPDATE_COOLDOWN does not fire for it -- so a charge-based gate spell would come back
--- ready with nothing to tell us. Power Infusion has no charges today; this is registered
--- because the gate spell is configurable and the failure would be silent. Danders' own cooldown
--- addon registers the pair for the same reason.
-pihWatcher:RegisterEvent("SPELL_UPDATE_CHARGES")
 pihWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
-pihWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+
+-- ☠ THE OTHER EVENTS ONLY EXIST WHILE A HELPER DOES. SPELL_UPDATE_COOLDOWN fires on
+-- every global cooldown for every class, and the panel is priest-gated -- a permanent
+-- registration would cost most users a cooldown read per GCD in service of a feature they
+-- cannot even add. Login stays permanent: it is what discovers whether a helper exists.
+--
+-- ⚠ CHARGES FIRE THEIR OWN EVENT. A charge returning is a spell becoming usable again,
+-- and SPELL_UPDATE_COOLDOWN does not fire for it -- so a charge-based gate spell would come
+-- back ready with nothing to tell us. Power Infusion has no charges today; registered because
+-- the capability underneath is not priest-specific and the failure would be silent. Danders'
+-- own cooldown addon registers the pair for the same reason.
+--
+-- ⚠ UNIT_SPELLCAST_SUCCEEDED is filtered at the C level (RegisterUnitEvent): only the
+-- player's own cast can shut the gate, and unfiltered this event is every cast by every
+-- tracked unit -- party, raid, pets -- all discarded one line into the handler.
+--
+-- GROUP_ROSTER_UPDATE is for SOUND: registrations are per unit and are otherwise only made
+-- on gate edges, so anyone who joined after the last edge got no cue -- and the player's own
+-- no-register guard went stale when sorting moved them to another token.
+local PIH_WATCH_EVENTS = { "SPELL_UPDATE_COOLDOWN", "SPELL_UPDATE_CHARGES",
+                           "UNIT_SPELLCAST_SUCCEEDED", "GROUP_ROSTER_UPDATE" }
+local pihWatching = false
+pihSyncWatcher = function()
+    local want = pihSettings() ~= nil
+    if want == pihWatching then return end
+    pihWatching = want
+    for _, ev in ipairs(PIH_WATCH_EVENTS) do
+        if not want then
+            pihWatcher:UnregisterEvent(ev)
+        elseif ev == "UNIT_SPELLCAST_SUCCEEDED" and pihWatcher.RegisterUnitEvent then
+            pihWatcher:RegisterUnitEvent(ev, "player")
+        else
+            pihWatcher:RegisterEvent(ev)
+        end
+    end
+end
+
+local pihRosterPending = false
 pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
-    if not pihGateEnabled then return end   -- switched off: nothing shuts or opens it
-    if pihManual ~= nil then return end
+    if event == "GROUP_ROSTER_UPDATE" then
+        -- Debounced: forming a group fires this in bursts, and one re-arm covers them all.
+        -- Deliberately OUTSIDE the gate-enabled/manual guards below: gate off means the
+        -- helper always shows, and its sound still has to reach a late joiner.
+        if pihSoundCfg and not pihRosterPending and C_Timer and C_Timer.After then
+            pihRosterPending = true
+            C_Timer.After(0.5, function()
+                pihRosterPending = false
+                pihSoundsArmed(pihGateOpen)
+            end)
+        end
+        return
+    end
+    if event ~= "PLAYER_ENTERING_WORLD" then
+        if not pihGateEnabled then return end   -- switched off: nothing shuts or opens it
+        if pihManual ~= nil then return end
+    end
 
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         -- The only thing that shuts the gate. Our own cast of the gate spell, nothing else.
@@ -443,6 +525,12 @@ pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
 
     if event == "PLAYER_ENTERING_WORLD" then
         Engine:PIH_ApplySaved()   -- saved settings, before any gate decision
+        -- ☠ RE-CHECK THE SWITCH AFTER APPLYING, because at login the file-locals
+        -- still hold their initialisers until ApplySaved loads the saved values. Without
+        -- this, a saved "don't hide" was overridden by the cooldown read below: reload
+        -- mid-cooldown and the helper hid anyway -- the exact opposite of the setting --
+        -- for the rest of that cooldown.
+        if not pihGateEnabled or pihManual ~= nil then return end
         -- ☠ THE ONE PLACE isActive MAY SHUT THE GATE. On load we never saw the cast, so a
         -- reload mid-cooldown would otherwise leave the helper showing for the rest of it.
         -- Safe here specifically because nothing is being cast at this instant, so a true
@@ -458,9 +546,12 @@ pihWatcher:SetScript("OnEvent", function(_, event, unit, _, spellID)
     -- player pressed it -- where shutting from here would mean trusting a flag read at whatever
     -- instant a chatty event happened to fire. One shut path, one open path, and the read that
     -- was wrong before is only used where a wrong answer cannot shut anything.
+    -- ⚠ Cheapest test first: this branch only ever OPENS the gate, so with the gate
+    -- already open there is nothing to do and no reason to pay for a cooldown read -- and
+    -- this event fires on every global cooldown, all fight long.
+    if pihGateOpen then return end
     local ready = pihReadReady()
     if not ready then return end
-    if pihGateOpen then return end
     local n = pihSet(false)
     DF:Debug("AURADESIGNER", "PIH gate -> OPEN, cooldown cleared (%d container%s)",
         n, n == 1 and "" or "s")
@@ -557,5 +648,10 @@ SlashCmdList["DFPI"] = function(msg)
             local t = {}; for k in pairs(r) do t[#t + 1] = k end; table.sort(t)
             return table.concat(t, ", ")
         end)())
+        :Field("watching events", pihWatching and "yes" or "no (no helper installed)")
+        -- ⚠ applyGroupTuning refuses in test mode, so a gate edge redraws nothing
+        -- there -- indistinguishable from a broken gate unless the readout says so.
+        :Line((DF.testMode or DF.raidTestMode)
+            and "test mode is ON: gate changes do not redraw test previews" or nil, "neutral")
         :Hints("/df debug pi off", "/df debug pi on", "/df debug pi auto")
 end

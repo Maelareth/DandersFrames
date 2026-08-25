@@ -772,6 +772,11 @@ local function helperRoleExcluded(unit)
     return helperExcludedRoles[role] == true
 end
 
+-- Shared with the SOUND path (Factory): sound registers per unit and never passes the
+-- container funnel, so role exclusion must be answerable from outside it -- or a cue plays
+-- for a unit nothing marks.
+function AuraContainer.IsHelperRoleExcluded(unit) return helperRoleExcluded(unit) end
+
 -- A record's candidateFilters REPLACES the config-wide set for that group/slot
 -- (the dispel overlay's per-type slots) — see normalizeFilters.
 local function recordCandidateFilters(rec, config)
@@ -6161,7 +6166,7 @@ function AuraContainer.SetHelperGate(dark)
     return n
 end
 
-function AuraContainer.GetHelperGate() return helperGateDark, helperExcludedRoles ~= nil end
+function AuraContainer.GetHelperGate() return helperGateDark end
 
 function AuraContainer.SetHelperExcludedRoles(roles)
     helperExcludedRoles = roles

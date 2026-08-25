@@ -2836,8 +2836,8 @@ L["Deletes its indicators and its spell lists. Nothing else is touched."] = true
 -- on afterwards, so each label has to stand alone with just the line beneath it for context.
 L["What to Show"] = true
 L["Big cooldown"] = true
--- How the surface pickers behave. Three things the controls cannot show on their own: which
--- surfaces stack, which pick one winner, and that an occupied one swaps rather than refuses.
+-- How the surface pickers behave. What the controls cannot show on their own: which
+-- surfaces stack, and which pick one winner.
 L["Health Bar and Background can show several indicators at once."] = true
 L["Border and Text colours show only one at a time."] = true
 -- Surface picker. Every surface is listed; one already held by a signal on the same spell list
@@ -2850,7 +2850,10 @@ L["Already has active Power Infusion"] = true
 -- The offender is NAMED: "something else colours the border" sends someone hunting through
 -- their own effects list, where a name turns the warning into an instruction. %s is that name,
 -- or the "%s and %d more" form when several contend.
-L["%s already colours the border. Only one can show — tick 'Give this aura its own border' on one of them, or move this signal somewhere else."] = true
+-- The second %s is L["Give this aura its own border"] -- the checkbox's own label key rides
+-- as a placeholder so a translator renders it once and the sentence can never drift from the
+-- control it points at.
+L["%s already colours the border. Only one can show — tick '%s' on one of them, or move this signal somewhere else."] = true
 L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."] = true
 L["%s and %d more"] = true
 L["Another effect"] = true
@@ -2866,13 +2869,16 @@ L["Hide the helper while Power Infusion is on cooldown"] = true
 -- finer; the pointer names the editor that does go spell by spell, so the limit is not a
 -- dead end.
 L["Classes to Watch"] = true
-L["Tick what makes someone worth infusing. It shows on your party frames, and hides itself while your own Power Infusion is on cooldown."] = true
+L["Tick what makes someone worth infusing. It shows on your group frames."] = true
 L["To add or remove single spells, open the list itself."] = true
 L["Untick a class to ignore its cooldowns."] = true
 -- Sound. The helper owns this entry outright: the generic effects list refuses to show sound
 -- on a filter-owned record, so it offers no row and no delete button for it either.
-L["Play a sound when a window opens"] = true
-L["Only plays while your Power Infusion is ready."] = true
+L["Play a sound when someone becomes worth infusing"] = true
+L["Only plays while the helper is showing."] = true
+-- Show When Missing's greyed-out reason on a helper effect (Indicators.lua GateSWM): the
+-- missing-mode render path is the one place the helper's cooldown gate cannot reach.
+L["Not available on a Power Infusion Helper signal."] = true
 -- Row labels. The first two share one spell list on purpose, so without these the
 -- rows read identically -- distinguishable only by their type badge.
 L["PI Helper — Big cooldown"] = true
