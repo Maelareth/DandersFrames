@@ -249,11 +249,6 @@ local function pihLabel(key)
     if key == "infused" then return L["PI Helper — Already has active Power Infusion"] end
 end
 
-local function pihSentinel()
-    return DF.AuraContainer and DF.AuraContainer.GetHelperSentinel
-        and DF.AuraContainer.GetHelperSentinel()
-end
-
 local function pihFilterIdByName(name)
     local R = DF.FilterRegistry
     if not (R and R.ReadStore) then return nil end
@@ -268,7 +263,11 @@ end
 -- so re-running the recipe repairs rather than doubles.
 -- `wipeFirst` empties the list before re-seeding, which is how the amplifier list is rewritten
 -- in place -- see pihSyncAmplifierFilter for why it must keep its id.
-local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel, wipeFirst)
+-- Ownership is NOT in this list. It used to be -- a synthetic id seeded alongside the real
+-- spells, which the gate read back out of the resolved map. That worked and was still wrong: a
+-- fake id in real data travels with an exported profile and is unexplainable a year later. The
+-- mark now lives on the effect (`cfg.pihSignal`) and reaches the engine as `config.dfGate`.
+local function pihEnsureFilter(name, presetKeys, extraIDs, wipeFirst)
     local R = DF.FilterRegistry
     if not (R and R.CreateCustomFilter) then return nil end
     local existing = pihFilterIdByName(name)
@@ -289,12 +288,6 @@ local function pihEnsureFilter(name, presetKeys, extraIDs, withSentinel, wipeFir
             for _, rec in ipairs(recs or {}) do R:AddSpellToCustom(id, rec.id) end
         end
         for _, sid in ipairs(extraIDs or {}) do R:AddSpellToCustom(id, sid) end
-    end
-    -- The sentinel is re-asserted every time regardless: it is ownership rather than content,
-    -- and a list without it is a list the gate cannot recognise as ours.
-    if withSentinel then
-        local s = pihSentinel()
-        if s then R:AddSpellToCustom(id, s) end
     end
     return id
 end
@@ -412,9 +405,7 @@ local function pihSyncAmplifierFilter(s)
     if s.potions  then presets[#presets + 1] = PIH_SEED.amplifiers.potions  end
     if s.trinkets then presets[#presets + 1] = PIH_SEED.amplifiers.trinkets end
     if #presets == 0 then return nil end
-    -- No sentinel: this list is only ever a condition TRIGGER, never an effect's own identity,
-    -- so it is never the map the gate inspects.
-    return pihEnsureFilter(PIH_FILTERS.amplifiers, presets, nil, false, true)
+    return pihEnsureFilter(PIH_FILTERS.amplifiers, presets, nil, true)
 end
 
 local function pihCreateSignal(key)
@@ -424,7 +415,7 @@ local function pihCreateSignal(key)
 
     local s = P.PIH_Settings()
 
-    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, nil, pihSeedIDs(), true)
+    local cdId = pihEnsureFilter(PIH_FILTERS.cooldowns, nil, pihSeedIDs())
     if not cdId then return false, "could not build the cooldown list" end
     -- ☠ RECORDED FOR THE RESIDENT HALF, WHICH CANNOT SEE THIS FILE. The sound registrations run
     -- in the always-loaded addon and need this list; they used to find it by NAME and were
@@ -437,7 +428,7 @@ local function pihCreateSignal(key)
 
     local ref = cdRef
     if def.list == "infused" then
-        local infId = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID }, true)
+        local infId = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID })
         if not infId then return false, "could not build the infused list" end
         ref = DF:MakeADFilterRef("custom", infId)
         if not ref then return false, "could not name the infused list" end

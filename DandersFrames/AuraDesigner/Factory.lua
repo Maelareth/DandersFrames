@@ -960,6 +960,29 @@ local AD_CHAIN_GATE_OFFSET = -3
 local AD_TEXT_CHAIN_GATE_OFFSET = 30
 -- ============================================================
 
+-- === HELPER-GATE OWNERSHIP ===
+-- Stamps `dfGate` onto a container config so AuraContainer's funnel can recognise it as the
+-- Power Infusion Helper's and darken it. `src` is the effect config the recipe wrote, which
+-- carries `pihSignal`; anything without that mark is left completely untouched.
+--
+-- ONE HELPER, CALLED AT EVERY SITE -- Danders' condition when he took this route over
+-- threading a parameter through six shared builders. The point is that a site which forgets to
+-- stamp reads as an ABSENT LINE in a known list rather than as an invisible omission. Do not
+-- inline the assignment at a call site; add the call.
+--
+-- Returns its first argument, so it wraps a builder in place:
+--     DF.AuraContainer:Create(frame, stampGate(buildBorderConfig(...), cfg))
+-- Builders that already receive the effect config (placed indicators take `indicator`, filter
+-- groups take `group`) stamp INSIDE themselves instead -- there is nothing to forget there.
+--
+-- SHOW-WHEN-MISSING IS NOT STAMPED, deliberately. applyGroupTuning early-returns on
+-- mode == "missing", so a missing-mode container cannot be live-gated at all; stamping it
+-- would advertise a gate that never fires. The helper does not offer SWM on gated effects.
+local function stampGate(config, src)
+    if config and src and src.pihSignal then config.dfGate = true end
+    return config
+end
+
 -- Build an OVERLAY-TINT container config (health-bar tint, background tint). mode="overlay":
 -- the slot covers the host region and its tint texture (child of the slot) inherits the
 -- slot's secret visibility; DF.AuraContainer handles SetEnabled-last + combat deferral.
@@ -2119,6 +2142,9 @@ end
 
 local function buildPlacedConfig(frame, unit, map, indicator, isSquare, borderSpec, defs, mine)
     return {
+        -- Helper ownership: this builder already holds the effect config, so it stamps itself
+        -- rather than being wrapped by its callers. See stampGate.
+        dfGate = indicator.pihSignal and true or nil,
         unit = unit,
         mode = "row",
         max = 1,
@@ -2559,6 +2585,7 @@ end
 -- the icon/square placed indicators — resolveLevel's absolute value, nothing added.
 local function buildBarConfig(frame, unit, map, indicator, borderSpec, defs, mine)
     return {
+        dfGate = indicator.pihSignal and true or nil,   -- stamps itself; see stampGate
         unit = unit,
         mode = "row",
         max = 1,
@@ -3318,6 +3345,7 @@ local function buildFilterGroupConfig(frame, map, group, mine, defs)
     local borderSpec = buildGroupBorderSpec(frame, group)
     local filt = poolFilter(group, mine)
     return {
+        dfGate = group.pihSignal and true or nil,   -- stamps itself; see stampGate
         unit = frame.unit,
         mode = "row",
         max = math.max(1, tonumber(group.maxIcons) or 8),
@@ -4193,28 +4221,28 @@ end
 -- ⚠ NARROWING IS BY THE TARGET UNIT'S CLASS, and a record's `class` is the class that OWNS the
 -- spell -- the CASTER's. For burst cooldowns those coincide (they are self-buffs), which is
 -- why this is right for the helper's real list. For a buff cast ON someone else it is wrong:
--- Power Word: Shield is class=PRIEST but lands on anyone. Switchable so a test can use a
--- cast-on-others buff; the helper itself never should.
+-- Power Word: Shield is class=PRIEST but lands on anyone. The helper's own list is only ever
+-- self-buffs, so narrowing is always on: `Factory._helperSoundNarrow` is read but no longer
+-- written, the switch having gone with the test commands. Set it false from a debug session
+-- if a cast-on-others buff ever needs registering.
+-- Every id in the map is now a real spell. It did not used to be: an earlier ownership marker
+-- rode here as a synthetic id and had to be filtered back out, because registering a sound on it
+-- armed a trigger that could never fire AND made the registration count look healthy while
+-- nothing was listening. The mark moved onto the container config (`dfGate`), so the whole
+-- exclusion went with it.
 local function helperSoundMapFor(unit, map)
     if not map then return nil end
-    -- ☠ THE OWNERSHIP SENTINEL IS NOT A SPELL. It rides in the map to mark the effect as ours;
-    -- registering a sound on it arms a trigger that can never fire, and -- worse -- makes the
-    -- registration count look healthy while nothing is listening for anything real.
-    local sentinel = DF.AuraContainer and DF.AuraContainer.GetHelperSentinel
-        and DF.AuraContainer.GetHelperSentinel()
     local R = DF.FilterRegistry
     local _, classFile = UnitClass(unit)
     local narrow = (Factory._helperSoundNarrow ~= false)
     local out, n = {}, 0
     for spellID in pairs(map) do
-        if spellID ~= sentinel then
-            local rec = narrow and R and R.ByID and R.ByID[spellID] or nil
-            -- Unknown class, or no record to attribute the spell to, means we cannot narrow --
-            -- so keep it rather than silently shrinking the helper's own list.
-            if (not narrow) or (not classFile) or (not rec)
-                or rec.class == nil or rec.class == classFile then
-                out[spellID] = true; n = n + 1
-            end
+        local rec = narrow and R and R.ByID and R.ByID[spellID] or nil
+        -- Unknown class, or no record to attribute the spell to, means we cannot narrow --
+        -- so keep it rather than silently shrinking the helper's own list.
+        if (not narrow) or (not classFile) or (not rec)
+            or rec.class == nil or rec.class == classFile then
+            out[spellID] = true; n = n + 1
         end
     end
     return n > 0 and out or nil
@@ -4924,18 +4952,18 @@ local function syncBorderEntry(bd, frame, key, cfg, map, mine)
 
     local entry = bd[key]
     if not entry then
-        local handle = DF.AuraContainer:Create(frame, buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec))
+        local handle = DF.AuraContainer:Create(frame, stampGate(buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec), cfg))
         if handle then
             bd[key] = { handle = handle, structSig = structSig,
                         tuningSig = tuningSig, coSig = coSig }
         end
     elseif entry.structSig ~= structSig then
         entry.structSig, entry.tuningSig, entry.coSig = structSig, tuningSig, coSig
-        entry.handle:Rebuild(buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec), structSig)
+        entry.handle:Rebuild(stampGate(buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec), cfg), structSig)
     else
         if entry.tuningSig ~= tuningSig then
             entry.tuningSig = tuningSig
-            entry.handle:ApplyTuning(buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec))
+            entry.handle:ApplyTuning(stampGate(buildBorderConfig(frame.unit, map, spec, filt, drawAbove, pdSpec), cfg))
         end
         if entry.coSig ~= coSig then
             entry.coSig = coSig
@@ -5190,7 +5218,7 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
             syncConditionChain(hb, key, healthBar, frame.unit, chainHB, filt, "flat" .. (pdColor and "|pd" or "") .. "|l" .. tostring(lvlOffset),
                 tconcat({ "flat", tostring(r), tostring(g), tostring(b), tostring(blend), tostring(sublevel),
                     pdColor and colSig(pdColor) or "-" }, "|"),
-                function(m, f) return buildOverlayTintConfig(frame.unit, m, r, g, b, blend, lvlOffset, f, tintOpts) end,
+                function(m, f) return stampGate(buildOverlayTintConfig(frame.unit, m, r, g, b, blend, lvlOffset, f, tintOpts), cfg) end,
                 function(h) h:ApplyStyle({ overlay = { tintColor = { r, g, b, blend },
                     tintPandemicColor = tintOpts.pandemicColor, sublevel = tintOpts.sublevel } }) end,
                 AD_CHAIN_GATE_OFFSET)
@@ -5202,7 +5230,7 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
             syncConditionChain(hb, key, healthBar, frame.unit, chainHB, filt, "cover" .. (pdColor and "|pd" or "") .. "|l" .. tostring(lvlOffset),
                 tconcat({ "fill", tostring(r), tostring(g), tostring(b), tostring(alpha), tostring(tex), tostring(clampTo), tostring(sublevel),
                     pdColor and colSig(pdColor) or "-" }, "|"),
-                function(m, f) return buildHealthFillConfig(frame.unit, m, r, g, b, alpha, tex, clampTo, f, tintOpts) end,
+                function(m, f) return stampGate(buildHealthFillConfig(frame.unit, m, r, g, b, alpha, tex, clampTo, f, tintOpts), cfg) end,
                 function(h) h:ApplyStyle({ overlay = { healthFill = { texture = tex, color = { r, g, b }, alpha = alpha, clampTo = clampTo,
                         pandemicColor = tintOpts.pandemicColor },
                     sublevel = tintOpts.sublevel } }) end,
@@ -5281,7 +5309,7 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
         local coSig = tconcat({ "flat", tostring(r), tostring(g), tostring(b), tostring(blend), tostring(sublevel),
                     pdColor and colSig(pdColor) or "-" }, "|")
         if not entry then
-            local handle = DF.AuraContainer:Create(healthBar, buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts))
+            local handle = DF.AuraContainer:Create(healthBar, stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts), cfg))
             if handle then
                 hb[key] = { handle = handle, structSig = structSig,
                             tuningSig = tuningSig, coSig = coSig }
@@ -5289,12 +5317,12 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
             end
         elseif entry.structSig ~= structSig then
             entry.structSig, entry.tuningSig, entry.coSig = structSig, tuningSig, coSig
-            entry.handle:Rebuild(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts), structSig)
+            entry.handle:Rebuild(stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts), cfg), structSig)
             created = true
         else
             if entry.tuningSig ~= tuningSig then
                 entry.tuningSig = tuningSig
-                entry.handle:ApplyTuning(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts))
+                entry.handle:ApplyTuning(stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, lvlOffset, filt, tintOpts), cfg))
             end
             if entry.coSig ~= coSig then
                 entry.coSig = coSig
@@ -5316,7 +5344,7 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
         local coSig = tconcat({ "fill", tostring(r), tostring(g), tostring(b), tostring(alpha), tostring(tex), tostring(clampTo), tostring(sublevel),
                     pdColor and colSig(pdColor) or "-" }, "|")
         if not entry then
-            local handle = DF.AuraContainer:Create(healthBar, buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts))
+            local handle = DF.AuraContainer:Create(healthBar, stampGate(buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts), cfg))
             if handle then
                 hb[key] = { handle = handle, structSig = structSig,
                             tuningSig = tuningSig, coSig = coSig }
@@ -5324,14 +5352,14 @@ local function syncHealthbarTint(hb, frame, healthBar, spec, key, cfg, map, mine
             end
         elseif entry.structSig ~= structSig then
             entry.structSig, entry.tuningSig, entry.coSig = structSig, tuningSig, coSig
-            entry.handle:Rebuild(buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts), structSig)
+            entry.handle:Rebuild(stampGate(buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts), cfg), structSig)
             created = true
         else
             if entry.tuningSig ~= tuningSig then
                 -- A tuning pass keeps the SAME slot and the same cover, so it
                 -- only needs the style re-applied, not a rebuild.
                 entry.tuningSig = tuningSig
-                entry.handle:ApplyTuning(buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts))
+                entry.handle:ApplyTuning(stampGate(buildHealthFillConfig(frame.unit, map, r, g, b, alpha, tex, clampTo, filt, tintOpts), cfg))
             end
             if entry.coSig ~= coSig then
                 entry.coSig = coSig
@@ -5382,7 +5410,7 @@ local function syncBackgroundTint(bg, store, frame, spec, key, cfg, map, mine, a
         syncConditionChain(bg, key, bgHost, frame.unit, chainBG, filt, "bgtint" .. (pdColor and "|pd" or ""),
             tconcat({ "bg", tostring(r), tostring(g), tostring(b), tostring(blend), tostring(sublevel),
                 pdColor and colSig(pdColor) or "-" }, "|"),
-            function(m, f) return buildOverlayTintConfig(frame.unit, m, r, g, b, blend, 0, f, tintOpts) end,
+            function(m, f) return stampGate(buildOverlayTintConfig(frame.unit, m, r, g, b, blend, 0, f, tintOpts), cfg) end,
             function(h) h:ApplyStyle({ overlay = { tintColor = { r, g, b, blend },
                     tintPandemicColor = tintOpts.pandemicColor, sublevel = tintOpts.sublevel } }) end,
             AD_CHAIN_GATE_OFFSET)
@@ -5437,7 +5465,7 @@ local function syncBackgroundTint(bg, store, frame, spec, key, cfg, map, mine, a
     local entry = bg[key]
     local created = false
     if not entry then
-        local handle = DF.AuraContainer:Create(bgAnchor, buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts))
+        local handle = DF.AuraContainer:Create(bgAnchor, stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts), cfg))
         if handle then
             bg[key] = { handle = handle, structSig = structSig,
                         tuningSig = tuningSig, coSig = coSig }
@@ -5445,12 +5473,12 @@ local function syncBackgroundTint(bg, store, frame, spec, key, cfg, map, mine, a
         end
     elseif entry.structSig ~= structSig then
         entry.structSig, entry.tuningSig, entry.coSig = structSig, tuningSig, coSig
-        entry.handle:Rebuild(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts), structSig)
+        entry.handle:Rebuild(stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts), cfg), structSig)
         created = true
     else
         if entry.tuningSig ~= tuningSig then
             entry.tuningSig = tuningSig
-            entry.handle:ApplyTuning(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts))
+            entry.handle:ApplyTuning(stampGate(buildOverlayTintConfig(frame.unit, map, r, g, b, blend, 0, filt, tintOpts), cfg))
         end
         if entry.coSig ~= coSig then
             entry.coSig = coSig
@@ -5734,7 +5762,7 @@ function Factory:SyncFrame(frame)
             return syncConditionChain(bd, bestName, frame, frame.unit, chainLinks, filt,
                 "da=" .. tostring(drawAboveBD) .. (pdChain and "|pd" or ""),
                 borderSpecSig(bestSpec) .. (pdChain and ("|pd=" .. colSig(bestCfg.pandemicColor)) or ""),
-                function(map, f) return buildBorderConfig(frame.unit, map, bestSpec, f, drawAboveBD, pdChain) end,
+                function(map, f) return stampGate(buildBorderConfig(frame.unit, map, bestSpec, f, drawAboveBD, pdChain), bestCfg) end,
                 function(h) h:ApplyStyle({ border = { spec = bestSpec, pandemicSpec = pdChain } }) end,
                 AD_CHAIN_GATE_OFFSET) and true or false
         end
@@ -5830,7 +5858,7 @@ function Factory:SyncFrame(frame)
                 local entry = st[bestName]
                 if not entry then
                     local handle = DF.AuraContainer:Create(frame,
-                        buildMirrorHostConfig(frame.unit, bestMap, onHost, filt))
+                        stampGate(buildMirrorHostConfig(frame.unit, bestMap, onHost, filt), bestCfg))
                     if handle then
                         st[bestName] = { handle = handle, structSig = structSig,
                                          tuningSig = tuningSig, coSig = coSig,
@@ -5850,7 +5878,7 @@ function Factory:SyncFrame(frame)
                     -- unless the callback's captured state is folded into the key.
                     -- (This branch is unreachable today: a constant sig never differs.)
                     entry.structSig, entry.tuningSig, entry.coSig = structSig, tuningSig, coSig
-                    entry.handle:Rebuild(buildMirrorHostConfig(frame.unit, bestMap, onHost, filt))
+                    entry.handle:Rebuild(stampGate(buildMirrorHostConfig(frame.unit, bestMap, onHost, filt), bestCfg))
                 elseif entry.tuningSig ~= tuningSig then
                     -- Selection edit only: swap the include map on the live slot. Kept as a
                     -- branch of this elseif chain (rather than folded into the else) so the
@@ -5860,7 +5888,7 @@ function Factory:SyncFrame(frame)
                     -- entry.host is deliberately untouched: the slot survives a tuning pass,
                     -- so onHost does not re-fire and the stashed host stays valid.
                     entry.tuningSig = tuningSig
-                    entry.handle:ApplyTuning(buildMirrorHostConfig(frame.unit, bestMap, onHost, filt))
+                    entry.handle:ApplyTuning(stampGate(buildMirrorHostConfig(frame.unit, bestMap, onHost, filt), bestCfg))
                 elseif entry.coSig ~= coSig then
                     entry.coSig = coSig
                     entry.handle:ApplyStyle({ overlay = { mirrorHost = { onHost = onHost } } })

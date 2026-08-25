@@ -700,37 +700,35 @@ end
 local HELPER_GATE_DEAD_CF = { includeSpellIDs = { [1] = true } }
 local helperGateDark = false
 
--- ☠ OWNERSHIP: THE SENTINEL. The gate must only ever darken our own effects. The first cut
+-- ☠ OWNERSHIP: `config.dfGate`. The gate must only ever darken our own effects. The first cut
 -- asked "does this container watch the spell we care about", which also caught a USER'S
 -- effect on the same spell -- darkened by a feature they never enabled, for a reason nothing
 -- on screen explains. Harmless while the helper watched one throwaway buff; unacceptable once
 -- it watches sixty real cooldowns.
 --
--- The marker is one id carried in the helper's OWN filter data. It rides into the resolved
--- map like any other spell (Registry.lua:964 puts unmuted rawIDs straight into the include
--- map) and the funnel reads its presence as "ours". Nothing outside our own data changes, and
--- a user's effect cannot contain it by accident.
+-- The mark is a plain flag on the container config, stamped by whoever built it. It says
+-- nothing about content, so it cannot be confused with a spell, and a user's effect cannot
+-- acquire it by accident.
 --
--- Sits far above any real spell (SpellDB's highest is 1310372) and is absent from the
--- database, so GetCustomFilter's re-bucketing -- which promotes a rawID the moment SpellDB
--- learns it -- leaves it raw forever. It matches no aura.
+-- ⛔ AN EARLIER CUT PUT A SYNTHETIC SPELL ID IN THE HELPER'S OWN FILTER DATA AND READ THAT.
+-- It worked, and it was wrong for three reasons that only surfaced once it was written down:
+--   * A fake id in real data TRAVELS. Profiles are exported, imported and decoded, and nobody
+--     reading one a year from now could explain what 1999000060 was.
+--   * It could not mark everything. buildDebuffGroupConfig carries no config-wide candidate
+--     filters at all, so a debuff group was unmarkable; and a filter group's resolved map is
+--     CACHED AND SHARED between every consumer of the same filter, so stamping an id into one
+--     would have leaked the mark into unrelated effects.
+--   * It rode into the sound path as if it were a spell, so helperSoundMapFor had to filter it
+--     back out -- a fake registration that could never fire, inflating the count while nothing
+--     real was listening.
+-- Danders ruled the field name and we chose the route (each caller stamps the returned config,
+-- rather than six builders taking a new parameter). See Factory.lua's `stampGate`.
 --
--- ⚠ Long-term home is a marker threaded through the container config, written by the recipe.
--- That is ~13 mechanical edits across the config builders and is Danders' call. Escalated,
--- not blocking. See .claude/for-danders.md.
-local HELPER_GATE_SENTINEL = 1999000060
-
 -- ⚠ NO "ARMED" FLAG. There was one, and it only ever caused a bug: ownership is a property of
--- the MAP, not of whether anything has flipped a switch yet. Gating is decided below by
+-- the CONFIG, not of whether anything has flipped a switch yet. Gating is decided below by
 -- (gate shut OR role excluded), so with neither true nothing darkens regardless -- which is
 -- what the flag was for. Its only real effect was that role exclusion silently did nothing
 -- until an unrelated gate command happened to arm it first.
-local function helperGateIsOurs(cf)
-    local inc = cf and cf.includeSpellIDs
-    return (inc and inc[HELPER_GATE_SENTINEL]) and true or false
-end
-
-function AuraContainer.GetHelperSentinel() return HELPER_GATE_SENTINEL end
 
 -- ═══ ROLE EXCLUSION ═══
 -- Never mark someone you would not infuse. The cooldown gate is ONE switch for everyone; this
@@ -780,7 +778,10 @@ local function recordCandidateFilters(rec, config)
     local cf = rec.candidateFilters or config.candidateFilters
     -- Two independent reasons to go dark: the cooldown switch (everyone at once) and this
     -- unit's role (this frame only). Both resolve to the same dead map.
-    if helperGateIsOurs(cf) and (helperGateDark or helperRoleExcluded(config.unit)) then
+    -- Ownership is read off the CONFIG, never off the map -- see `config.dfGate` above. That is
+    -- why a record carrying its own candidateFilters is still gated correctly: the mark and the
+    -- content are separate things now.
+    if config.dfGate and (helperGateDark or helperRoleExcluded(config.unit)) then
         return HELPER_GATE_DEAD_CF
     end
     return cf
@@ -6127,14 +6128,11 @@ end
 -- ═══ HELPER GATE: BROADCAST AND BACKSTOP ═══
 -- Does this handle carry one of ours? Checked against STORED config, never the gated result,
 -- so it answers the same either side of an edge.
+-- One field, and no walk over the records: the mark lives on the config itself, so a group
+-- whose records carry their own candidate filters is recognised the same as any other.
 local function helperGateHandleIsOurs(h)
     local cfg = h and h.config
-    if not cfg then return false end
-    if helperGateIsOurs(cfg.candidateFilters) then return true end
-    for _, rec in ipairs(normalizeFilters(cfg.filter)) do
-        if helperGateIsOurs(rec.candidateFilters) then return true end
-    end
-    return false
+    return (cfg and cfg.dfGate) and true or false
 end
 
 -- Flip the switch and broadcast. Returns how many containers were re-pushed.
