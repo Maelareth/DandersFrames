@@ -314,8 +314,8 @@ end
 -- So while the gate is DARK we poll. Only while dark, one boolean read per tick, and it stops
 -- itself the moment the spell is ready -- so the cost is a couple of reads per second during a
 -- cooldown and nothing at all the rest of the time.
--- Reads ONE field. `isActive` is plain in combat; startTime / duration / modRate all seal, so
--- nothing here compares a secret and nothing can throw on one.
+-- Reads FLAGS ONLY. `isActive` is plain in combat and `isOnGCD` is guarded below; startTime /
+-- duration / modRate all seal and none of them is touched, so nothing here compares a secret.
 --
 -- ☠☠ BUT `isActive` CANNOT TELL A REAL COOLDOWN FROM THE GLOBAL COOLDOWN. Casting ANY spell
 -- makes EVERY spell report active for the duration of the GCD. Watched 2026-08-23: with the
@@ -327,34 +327,48 @@ end
 -- ⇒ SO THIS IS ONLY EVER USED FOR "IS IT READY AGAIN", NEVER FOR "HAS IT JUST GONE DOWN".
 -- Opening on `not isActive` is safe: the GCD lapsing and the real cooldown ending both mean
 -- genuinely ready. Shutting is driven by the CAST instead -- see the watcher below.
--- Longest global cooldown the game hands out. Only reached by the fallback below, where there
--- is no clean flag to read and a duration is the only thing left to judge by.
-local PIH_GCD_MAX = 1.55
-
 -- ⭐⭐ A REAL COOLDOWN IS `isActive` AND NOT `isOnGCD`. Danders' answer to our GCD finding
 -- (2026-08-23), and it replaces the workaround rather than sitting beside it: `isActive` alone
 -- reads true for EVERY spell while the global cooldown runs, so the helper blinked off whenever
 -- the player cast anything. `isOnGCD` is the sibling flag that says which of the two it is, and
 -- both stay readable in combat while startTime / duration / modRate seal.
 --
--- ⚠ Shape copied from DandersCDM's `ClassifyCooldown` (Display/CooldownBar.lua), which credits
+-- Shape follows DandersCDM's `ClassifyCooldown` (Display/CooldownBar.lua), which credits
 -- Ellesmere's hooks for the same discriminator -- "no duration/magnitude math, only the clean
--- bool flags". ☠ WE COULD NOT READ THAT FUNCTION: DandersCDM is not installed on this machine,
--- so this is built from Danders' description of it, not copied from it. He has been asked to
--- paste it so the three branches below can be checked against the original rather than against
--- a paraphrase.
+-- bool flags". Danders pasted that function on 2026-08-24, so the branches below are checked
+-- against the original rather than against a paraphrase of it.
 --
--- Two things the flags cannot always give us, and both fall back to a duration test:
---   * `isOnGCD` can come back SECRET -- guarded, never compared.
---   * A client whose info table has no `isOnGCD` at all.
--- The fallback asks "is this longer than any global cooldown", which is the same question with
--- worse evidence; it is only reached when the good evidence is unavailable.
+-- ⚠ WE DELIBERATELY DO NOT COPY ITS DURATION FALLBACK, and the reason is our own rule. CDM
+-- compares `duration` against the GCD when `isOnGCD` is missing, because CDM also serves clients
+-- whose info table genuinely lacks the field. Ours never will, and Danders checked the history:
+-- nobody has ever observed `isOnGCD` sealing. That branch would be one we could never exercise.
+-- The `issecretvalue` GUARD stays -- a compare on a sealed value throws, so it prevents a hard
+-- error rather than being dead weight -- but when it fires we resolve from charges instead.
 --
--- ⚠ CHARGES. A spell with a charge in hand reads not-active, or active + isOnGCD during the
--- global; at zero charges it reads active and NOT on GCD -- which is exactly the "genuinely on
--- cooldown" verdict, so charge spells work without special handling here. What they DO need is
--- SPELL_UPDATE_CHARGES registered alongside SPELL_UPDATE_COOLDOWN, or a charge coming back fires
--- no event at all. Registered with the watcher rather than here.
+-- ⚠ CHARGES, and this is where the old fail-safe hurt. With the flags readable a charge spell
+-- needs no special handling: a charge in hand reads not-active (or active + isOnGCD during the
+-- global), and zero charges reads active and NOT on GCD, which is exactly "genuinely on
+-- cooldown". With the flags UNREADABLE, "assume on cooldown" would darken the helper while the
+-- player still held a charge and could infuse right now. `currentCharges` stays non-secret and
+-- answers precisely that, so it is what the unknown case resolves from.
+--
+-- ⚠ Latent, not live. The shipped panel has no gate-spell picker, so the gate spell is always
+-- Power Infusion, which has no charges. This is correctness for a capability that exists
+-- underneath, not a fix for anything a user can hit today.
+--
+-- ⚠ Charges also fire their own event -- SPELL_UPDATE_COOLDOWN does not cover a charge coming
+-- back. SPELL_UPDATE_CHARGES is registered with the watcher below for that reason.
+local function pihReadCharges(spellID)
+    if not (C_Spell and C_Spell.GetSpellCharges) then return nil end
+    local c = C_Spell.GetSpellCharges(spellID)
+    if not c then return nil end
+    local cur = c.currentCharges
+    -- Secret check MUST precede everything else: even a nil test on a secret throws on 12.1.
+    if issecretvalue and issecretvalue(cur) then return nil end
+    if type(cur) ~= "number" then return nil end
+    return cur
+end
+
 local function pihReadReady()
     local info = C_Spell and C_Spell.GetSpellCooldown and C_Spell.GetSpellCooldown(PI_SPELL_ID)
     if not info then return true end
@@ -367,11 +381,10 @@ local function pihReadReady()
         return gcd == true
     end
 
-    -- No usable flag. A duration inside one global cooldown is a global cooldown.
-    local dur = info.duration
-    if dur ~= nil and not (issecretvalue and issecretvalue(dur)) then
-        return dur <= PIH_GCD_MAX
-    end
+    -- No usable flag. A charge in hand means usable, whatever the spell cooldown claims.
+    local charges = pihReadCharges(PI_SPELL_ID)
+    if charges ~= nil then return charges >= 1 end
+
     -- Nothing readable either way. Treat as on cooldown: the failure we can afford is a helper
     -- that hides when it did not have to, not one that marks people we cannot infuse.
     return false
