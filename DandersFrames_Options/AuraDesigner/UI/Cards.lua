@@ -341,12 +341,47 @@ local function pihFound()
     return out
 end
 
-function P.PIH_Exists()
-    return next(pihFound()) ~= nil
+-- ─────────────────────────────────────────────────────────────
+-- THE COOLDOWN-ICON GROUP (a Filter Group carrying the burst signal)
+-- ─────────────────────────────────────────────────────────────
+-- ☠ A FOURTH WAY TO SHOW THE SAME SIGNAL, NOT A FOURTH SIGNAL. A placed icon pins
+-- max = 1 and shows ONE arbitrary cooldown; a Filter Group shows every matching cooldown the
+-- unit has running, one icon each -- the richer read of the burst window, and Danders'
+-- recommendation ("build it on merit, not as a fallback"). It is also the gate's native
+-- shape: the group builds through AuraContainer:Create with a config-wide candidate set, and
+-- buildFilterGroupConfig stamps dfGate from the group's own pihSignal mark -- no new gate
+-- code anywhere.
+--
+-- ⚠ BURST ONLY. Conditions are frame-level, so the strong window cannot ride a group,
+-- for the same reason it cannot be an Icon or a Square.
+--
+-- The group is ordinary Layout Groups data marked with pihSignal -- the same doctrine as the
+-- effects: the marks ARE the record. Hand-deleting it from the Layout Groups tab reads as
+-- the tick going off, and nothing is left holding a contrary opinion.
+local function pihIconGroup()
+    local groups = P.GetOtherLayoutGroups and P.GetOtherLayoutGroups(false)
+    for _, g in ipairs(groups or {}) do
+        if type(g) == "table" and g.pihSignal then return g end
+    end
+    return nil
 end
 
+-- The icon group counts as existing: without this, unticking all three signals while the
+-- icons stay on would flip the card back to "Add" and hide the panel -- stranding a running
+-- group with no control left that can reach it.
+function P.PIH_Exists()
+    return next(pihFound()) ~= nil or pihIconGroup() ~= nil
+end
+
+-- "On" means "shows somewhere": a colour effect, the icon group, or both. This is what lets
+-- the master tick survive "None" -- an icons-only signal is still a signal.
+-- ⚠ Strong's icon representation is its AMPLIFIER HALF (icons cannot make the
+-- cooldown-AND-amplifier judgement), which is why its tick is labelled by what it shows.
+local PIH_ICON_OF = { burst = "cooldowns", strong = "amplifiers", infused = "infused" }
 function P.PIH_SignalOn(key)
-    return pihFound()[key] ~= nil
+    if pihFound()[key] ~= nil then return true end
+    local which = PIH_ICON_OF[key]
+    return (which and P.PIH_IconsShow and P.PIH_IconsShow(which)) or false
 end
 
 -- ─────────────────────────────────────────────────────────────
@@ -406,14 +441,24 @@ local function pihSyncAmplifierFilter(s)
     local presets = {}
     if s.potions  then presets[#presets + 1] = PIH_SEED.amplifiers.potions  end
     if s.trinkets then presets[#presets + 1] = PIH_SEED.amplifiers.trinkets end
-    if #presets == 0 then return nil end
+    if #presets == 0 then
+        -- ⚠ Wipe in place rather than just declining: the "As icons" ticks may still
+        -- point at this list, and an early return left it holding the previous ticks' spells
+        -- -- icons for amplifiers the user had switched off.
+        local R = DF.FilterRegistry
+        local id = pihFilterIdByName(PIH_FILTERS.amplifiers)
+        local f = id and R and R.GetCustomFilter and R:GetCustomFilter(id)
+        if f then f.spells, f.rawIDs = {}, {} end
+        return nil
+    end
     return pihEnsureFilter(PIH_FILTERS.amplifiers, presets, nil, true)
 end
 
-local function pihCreateSignal(key)
+local function pihCreateSignal(key, surfaceOverride)
     local def = PIH_SIGNALS[key]
     if not def then return false, "no such signal" end
     if pihFound()[key] then return true, "already on" end
+    local tgt = surfaceOverride or def.surface
 
     local s = P.PIH_Settings()
 
@@ -457,23 +502,23 @@ local function pihCreateSignal(key)
     -- one record: the second simply replaces the first. Unreachable on the defaults; the guard
     -- is here for 3b, where the user can move a signal.
     local pool = pihOtherPoolRead()
-    local occupant = pool and pool[ref] and pool[ref][def.surface]
+    local occupant = pool and pool[ref] and pool[ref][tgt]
     if type(occupant) == "table" and occupant.pihSignal and occupant.pihSignal ~= key then
         return false, "that surface is already taken by another signal"
     end
 
-    local cfg = EnsureTypeConfig(ref, def.surface, pihOtherPoolWrite())
+    local cfg = EnsureTypeConfig(ref, tgt, pihOtherPoolWrite())
     if not cfg then return false, "could not create the effect" end
     -- ☠ THE MARK. This one field is what makes every question above answerable.
     cfg.pihSignal = key
     -- Its own row label. Burst and strong share one spell list, so without this they read
     -- identically in the effects list.
     cfg.label = pihLabel(key)
-    cfg[pihColorKey(def.surface)] = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
+    cfg[pihColorKey(tgt)] = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
     -- ☠ TINT, NOT REPLACE. A health-bar effect's generic default is Replace, which
     -- repaints the whole bar and covers every other tint -- the exact collision the panel's
     -- own note says cannot happen. Tint is the mode that stacks. Only healthbar has a mode.
-    if def.surface == "healthbar" then cfg.mode = "Tint" end
+    if tgt == "healthbar" then cfg.mode = "Tint" end
     -- ⚠ OTHERS ONLY. Twins of the Sun Priestess is near-always taken and copies every Power
     -- Infusion cast back onto the priest, so an any-caster mark would light our own frame
     -- after every cast.
@@ -639,7 +684,11 @@ end
 
 function P.PIH_SurfaceOf(key)
     local hit = pihFound()[key]
-    return hit and hit.typeKey or nil
+    if hit then return hit.typeKey end
+    -- Icons-only: the signal is on with no colour, and the dropdown says so.
+    local which = PIH_ICON_OF[key]
+    if which and P.PIH_IconsShow and P.PIH_IconsShow(which) then return "none" end
+    return nil
 end
 
 -- The dropdown's option set, rebuilt per signal because what is available depends on where the
@@ -666,6 +715,14 @@ function P.PIH_SurfaceOptions(key)
         opts[surface] = takenBy and format(L["%s (swap with %s)"], label, pihLabel(takenBy)) or label
         opts._order[#opts._order + 1] = surface
     end
+    -- "None" makes colour VISIBLY optional -- it is the entry that lets one row enumerate
+    -- colour-only / icons-only / both. First in the list (user's call): an opt-out reads as
+    -- the baseline you depart from, not a footnote you discover. On every signal, strong
+    -- included -- an icons-and-sound-only setup is first-class, and strong's icon half
+    -- (the amplifiers) is reachable without forcing a colour. L["None"] is the addon's
+    -- existing key, reused.
+    opts.none = L["None"]
+    table.insert(opts._order, 1, "none")
     return opts
 end
 
@@ -709,11 +766,24 @@ end
 -- Only ever fires between signals on the SAME record, which is the only case that cannot simply
 -- coexist; see pihSurfaceTakenBy.
 function P.PIH_SetSurface(key, surface)
+    if not PIH_SIGNALS[key] then return false, "no such signal" end
     local found = pihFound()
     local hit = found[key]
-    if not hit then return false, "that signal is not on" end
+
+    -- "No colour": drop the effect and nothing else. With icons on, the signal lives on as
+    -- icons-only; with icons off there is nothing left and the signal honestly reads off.
+    if surface == "none" then
+        if hit then pihDeleteSignal(key); pihRefresh() end
+        return true
+    end
+    -- Coming FROM icons-only: no effect exists to move, so create one where asked. Fresh
+    -- default colour -- there was no colour to carry.
+    if not hit then
+        local ok, why = pihCreateSignal(key, surface)
+        pihRefresh()
+        return ok, why
+    end
     if hit.typeKey == surface then return true end
-    if not PIH_SIGNALS[key] then return false, "no such signal" end
 
     local pool = pihOtherPoolRead()
     local auraCfg = pool and pool[hit.auraName]
@@ -857,6 +927,89 @@ end
 -- ⚠ ADDING TURNS ON ONE SIGNAL. Not everything it could build: a click that produces three
 -- indicators the user did not choose is a click that has decided for them, and two of the three
 -- are situational. Burst window is the one that is always worth having.
+-- The Layout Groups name is stored data, like the three filter names -- raw, never L[].
+local PIH_ICON_GROUP_NAME = "PI Helper — Cooldown icons"
+
+-- The three lists the icons box can show. State is READ OFF THE GROUP'S OWN SELECTION --
+-- one tick per list, no stored copy -- so editing the group by hand on the Layout Groups tab
+-- and using these ticks can never disagree.
+local PIH_ICON_LIST_NAMES = {
+    cooldowns  = PIH_FILTERS.cooldowns,
+    amplifiers = PIH_FILTERS.amplifiers,
+    infused    = PIH_FILTERS.infused,
+}
+
+function P.PIH_IconsShow(which)
+    local g = pihIconGroup()
+    if not (g and g.filterSelection and g.filterSelection.customs) then return false end
+    local id = pihFilterIdByName(PIH_ICON_LIST_NAMES[which])
+    return (id and g.filterSelection.customs[id]) and true or false
+end
+
+function P.PIH_SetIconsShow(which, on)
+    if not PIH_ICON_LIST_NAMES[which] then return false, "no such list" end
+    local g = pihIconGroup()
+
+    if not on then
+        if not g then return true end
+        local id = pihFilterIdByName(PIH_ICON_LIST_NAMES[which])
+        if id and g.filterSelection and g.filterSelection.customs then
+            g.filterSelection.customs[id] = nil
+        end
+        -- The last list going deletes the group: the marks are the record, and a group
+        -- showing nothing is a record of nothing. Through the shared delete, which also
+        -- sweeps the expanded-card key -- its tab-routed store is safe here because this
+        -- panel only exists on the Other Buffs tab.
+        if g.filterSelection and not next(g.filterSelection.customs or {}) then
+            if P.DeleteLayoutGroup then P.DeleteLayoutGroup(g.id) end
+        end
+        pihRefresh()
+        return true
+    end
+
+    -- ☠ EACH TICK BUILDS ITS OWN LIST IF IT MUST. The box cannot depend on What to
+    -- Show -- icons-only is a legitimate setup -- so a list no signal ever created is created
+    -- here, the same way the signals create theirs.
+    local id
+    if which == "cooldowns" then
+        local st = P.PIH_Settings()
+        id = st and st.cooldownFilterID
+        if not id then
+            id = pihEnsureFilter(PIH_FILTERS.cooldowns, nil, pihSeedIDs())
+            -- Recording the id is what makes the helper EXIST to the resident half (the
+            -- gate's watcher keys on it), so an icons-only setup still gets the gate.
+            if id and st then st.cooldownFilterID = id end
+        end
+    elseif which == "amplifiers" then
+        local st = P.PIH_Settings()
+        -- Same first-click rule as the strong signal: with neither amplifier ticked there is
+        -- nothing to show, so the first tick turns both on rather than appearing inert.
+        if not (st.potions or st.trinkets) then st.potions, st.trinkets = true, true end
+        id = pihSyncAmplifierFilter(st)
+    elseif which == "infused" then
+        id = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID })
+    end
+    if not id then return false, "could not build the list" end
+
+    if not g then
+        if not P.CreateLayoutGroup then return false, "layout groups unavailable" end
+        g = P.CreateLayoutGroup(PIH_ICON_GROUP_NAME, "filter")
+        if not g then return false, "could not create the group" end
+        -- ☠ THE MARK is ownership, not content: whichever lists are ticked, this is
+        -- the one field that puts the icons under "hide while Power Infusion is on cooldown"
+        -- and the role exclusions (buildFilterGroupConfig reads it and stamps dfGate).
+        g.pihSignal = "burst"
+        -- ☠ OTHERS ONLY IS NOT INHERITED FROM ANYTHING. poolFilter reads it off THIS
+        -- group; without it the filter is plain HELPFUL -- anyone's casts, including the
+        -- priest's own cooldowns lighting icons on their own frame. The exact trap the first
+        -- group test found on the effects, closed here at create time.
+        g.othersOnly = true
+    end
+    g.filterSelection.customs[id] = true
+    pihRefresh()
+    return true
+end
+
 function P.PIH_Create()
     local ok, why = pihCreateSignal("burst")
     if ok then
@@ -911,6 +1064,10 @@ function P.PIH_Remove()
                 end
                 if marksElsewhere then break end
             end
+            -- Icon groups reference the cooldown list by id, so they hold it alive too.
+            for _, g in ipairs((adDB and adDB.otherLayoutGroups) or {}) do
+                if type(g) == "table" and g.pihSignal then marksElsewhere = true break end
+            end
             if marksElsewhere then break end
         end
     end
@@ -921,6 +1078,11 @@ function P.PIH_Remove()
             if id and R and R.DeleteCustomFilter then R:DeleteCustomFilter(id) end
         end
     end
+
+    -- The icon group goes with the signals: it is the burst signal in another shape, and a
+    -- helper that no longer exists must not leave icons running.
+    local ig = pihIconGroup()
+    if ig and P.DeleteLayoutGroup then P.DeleteLayoutGroup(ig.id) end
 
     -- ☠ SOUND IS NOT A CONTAINER, so nothing above reaches it. Removing the helper has to
     -- silence it explicitly or the announcements outlive the feature that made them.
@@ -957,6 +1119,9 @@ function P.PIH_SetSignal(key, on)
         P.PIH_Apply()   -- see PIH_Create: writing settings is not applying them
     else
         pihDeleteSignal(key)
+        -- Off means off everywhere: the signal's own icon list goes with it, or the master
+        -- tick would re-read as on from the icons it left behind.
+        if PIH_ICON_OF[key] then P.PIH_SetIconsShow(PIH_ICON_OF[key], false) end
     end
     pihRefresh()
 end
@@ -976,12 +1141,14 @@ end
 function P.PIH_SetAmplifier(which, on)
     local s = P.PIH_Settings()
     s[which] = on and true or false
-    if P.PIH_SignalOn("strong") then
-        if not (s.potions or s.trinkets) then
-            pihDeleteSignal("strong")
-        else
-            pihSyncAmplifierFilter(s)   -- rewritten in place, so the effect keeps pointing at it
-        end
+    if not (s.potions or s.trinkets) then
+        -- Both off: the judgement loses its second half AND the icon list empties, so both
+        -- representations go -- or the strong row would read "on" while showing nothing.
+        pihDeleteSignal("strong")
+        P.PIH_SetIconsShow("amplifiers", false)
+        pihRefresh()
+    elseif P.PIH_SignalOn("strong") then
+        pihSyncAmplifierFilter(s)   -- rewritten in place, so the effect keeps pointing at it
         pihRefresh()
     end
 end
@@ -3786,6 +3953,24 @@ S.BuildEffectsTab = function()
                         or  format(L["%s already colours this text. Only one can show — raise this signal's priority, or move it somewhere else."], who),
                         "caution")
                 end
+
+                -- Icons sit BESIDE the colour dropdown, equal weight: with "None" in the
+                -- menu, one row enumerates colour-only / icons-only / both. Every row has
+                -- the same flow -- tick, dropdown, icons -- which is what three earlier
+                -- shapes kept breaking by parking the trinkets control under the wrong
+                -- signal. ⚠ Strong's tick is labelled by what it SHOWS -- its
+                -- amplifier half -- because icons cannot make its cooldown-AND-amplifier
+                -- judgement; a bare "As icons" there would over-promise. The colour tint
+                -- stays the only display that judges.
+                local which = PIH_ICON_OF[key]
+                local iconLabel = (key == "strong")
+                    and L["Their trinkets and potions as icons"] or L["As icons"]
+                g:AddWidget(GUI:CreateCheckbox(parent, iconLabel, nil, nil, nil,
+                    function() return P.PIH_IconsShow(which) end,
+                    function(v)
+                        P.PIH_SetIconsShow(which, v)
+                        S.SwitchTab("effects")
+                    end))
             end
 
             pihGroup(L["What to Show"], function(g)
@@ -3805,6 +3990,7 @@ S.BuildEffectsTab = function()
                 signalRow(g, "burst", L["Big cooldown"])
                 signalRow(g, "strong", L["Big cooldown with a trinket or potion"])
                 signalRow(g, "infused", L["Already has active Power Infusion"])
+
 
                 -- ☠ A LABEL, NOT AN INFO BANNER, AND THIS IS THE SECOND TIME THE SAME TRAP HAS
                 -- CAUGHT US. A banner starts life 34px tall and measures its real height a frame
@@ -3863,6 +4049,11 @@ S.BuildEffectsTab = function()
                 -- indicators, and the display-type names are short and already capitalised.
                 pihNote(g, L["Health Bar and Background can show several indicators at once."])
                 pihNote(g, L["Border and Text colours show only one at a time."])
+                -- The one navigational fact text is genuinely needed for. Only while the
+                -- icon group exists: position is not a question about icons that are not there.
+                if pihIconGroup() then
+                    pihNote(g, L["Move and size the icons under Layout Groups."])
+                end
             end)
 
             -- ☠ ONLY WHILE STRONG WINDOW IS ON. These two are what the signal MEANS, so on

@@ -2859,9 +2859,9 @@ L["%s and %d more"] = true
 L["Another effect"] = true
 -- Shared settings. These live on the helper, not on each effect: they are statements about
 -- who you would infuse, and there is only one answer per player.
-L["Trinkets and Potions"] = true
 L["Combat potions"] = true
 L["On-use trinkets"] = true
+L["Trinkets and Potions"] = true
 L["Never Show On"] = true
 L["Only applies when the group has roles."] = true
 L["Hide the helper while Power Infusion is on cooldown"] = true
@@ -2879,6 +2879,12 @@ L["Only plays while the helper is showing."] = true
 -- Show When Missing's greyed-out reason on a helper effect (Indicators.lua GateSWM): the
 -- missing-mode render path is the one place the helper's cooldown gate cannot reach.
 L["Not available on a Power Infusion Helper signal."] = true
+-- The icons controls: an "As icons" tick beside the colour dropdown on the two signals that
+-- can be a list ("No colour" in the menu is what makes icons-only reachable), plus the
+-- amplifiers include nested under burst's tick.
+L["As icons"] = true
+L["Their trinkets and potions as icons"] = true
+L["Move and size the icons under Layout Groups."] = true
 -- Row labels. The first two share one spell list on purpose, so without these the
 -- rows read identically -- distinguishable only by their type badge.
 L["PI Helper — Big cooldown"] = true
