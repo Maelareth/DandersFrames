@@ -336,6 +336,15 @@ local function pihFound()
                     out[cfg.pihSignal] = { auraName = auraName, typeKey = typeKey, cfg = cfg }
                 end
             end
+            -- Placed instances carry the mark too (Icon / Square surfaces). The hit's
+            -- typeKey is the instance's type, and indicatorID is what tells every consumer
+            -- this representation is an instance rather than a frame effect.
+            for _, inst in ipairs(auraCfg.indicators or {}) do
+                if type(inst) == "table" and inst.pihSignal then
+                    out[inst.pihSignal] = { auraName = auraName, typeKey = inst.type,
+                                            cfg = inst, indicatorID = inst.id }
+                end
+            end
         end
     end
     return out
@@ -431,6 +440,12 @@ local function pihRefresh()
     if DF.UpdateAllFrames then DF:UpdateAllFrames() end
     local Engine = DF.AuraDesigner and DF.AuraDesigner.Engine
     if Engine and Engine.ForceRefreshAllFrames then Engine:ForceRefreshAllFrames() end
+    -- The editor's own surfaces, same pair the picker's paths always call: without these a
+    -- deleted square or layout group stays PAINTED on the preview canvas until a reload --
+    -- field-found as "changing surface doesn't remove the square", when the data was right
+    -- and only the picture was stale.
+    if RefreshPlacedIndicators then RefreshPlacedIndicators() end
+    if RefreshPreviewEffects then RefreshPreviewEffects() end
 end
 
 -- ☠ THE AMPLIFIER LIST KEEPS ITS ID ACROSS A CHANGE. Strong window's conditions name this
@@ -498,6 +513,28 @@ local function pihCreateSignal(key, surfaceOverride)
         conditions = { mode = "ALL", groups = { { triggers = { cdRef } }, { triggers = { ampRef } } } }
     end
 
+    -- ☠ A PLACED TARGET MINTS AN INSTANCE, not a frame effect -- different store
+    -- (auraCfg.indicators), different creation call, and no sharing concerns: instances are
+    -- per-id, so two signals as icons coexist where two frame effects on one key cannot.
+    -- Strong never reaches here as placed -- its menu does not offer these (a placed
+    -- indicator cannot make the cooldown-AND-amplifier judgement) -- but refuse anyway:
+    -- a guard that relies on the menu is a guard that relies on every future menu.
+    if tgt == "icon" or tgt == "square" then
+        if key == "strong" then return false, "that signal cannot be an icon" end
+        local inst = CreateIndicatorInstance and CreateIndicatorInstance(ref, tgt)
+        if not inst then return false, "could not create the indicator" end
+        inst.pihSignal = key
+        -- ⚠ OTHERS ONLY IS PER INSTANCE on the placed path -- poolFilter reads it off
+        -- the indicator, not the record. Forgetting it here is the My-Buffs-pool trap for
+        -- the THIRD time: the icon would light on the priest's own casts.
+        inst.othersOnly = true
+        -- A square has a colour; an icon shows the aura's own artwork.
+        if tgt == "square" then
+            inst.color = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
+        end
+        return true
+    end
+
     -- ⚠ REFUSE A SURFACE ANOTHER SIGNAL IS SITTING ON. Two effects cannot share one surface on
     -- one record: the second simply replaces the first. Unreachable on the defaults; the guard
     -- is here for 3b, where the user can move a signal.
@@ -533,7 +570,17 @@ local function pihDeleteSignal(key)
     if not hit then return false end
     local pool = pihOtherPoolRead()
     local auraCfg = pool and pool[hit.auraName]
-    if auraCfg then auraCfg[hit.typeKey] = nil end
+    if hit.indicatorID and auraCfg and type(auraCfg.indicators) == "table" then
+        -- A placed representation: remove the instance, not a frame key. Direct removal
+        -- rather than RemoveIndicatorInstance for the same reason the prune below bypasses
+        -- CleanupAdHocAura -- that helper resolves the pool off the OPEN TAB, and ours is
+        -- always the Other pool.
+        for i, inst in ipairs(auraCfg.indicators) do
+            if inst.id == hit.indicatorID then table.remove(auraCfg.indicators, i) break end
+        end
+    elseif auraCfg then
+        auraCfg[hit.typeKey] = nil
+    end
     -- Drops the record once its last effect is gone -- the same prune the generic delete button
     -- runs, so unticking here and deleting the row there leave the profile identical.
     -- ⚠ NOT S.CleanupAdHocAura. It prunes an emptied record out of `CurrentAuraPool()` -- the
@@ -723,6 +770,16 @@ function P.PIH_SurfaceOptions(key)
     -- existing key, reused.
     opts.none = L["None"]
     table.insert(opts._order, 1, "none")
+    -- Placed surfaces, after the colours: one Icon at a spot you choose (the aura's own
+    -- artwork), or a Square (a flat colour block -- the quietest signal there is). Gated
+    -- and role-excluded like everything else since the slot lane landed. Not on strong: a
+    -- placed indicator cannot make its cooldown-AND-amplifier judgement.
+    if key ~= "strong" then
+        opts.icon   = L["Icon"]
+        opts.square = L["Square"]
+        opts._order[#opts._order + 1] = "icon"
+        opts._order[#opts._order + 1] = "square"
+    end
     return opts
 end
 
@@ -742,6 +799,24 @@ local function pihCapture(hit)
 end
 
 local function pihPlace(key, auraName, surface, carried)
+    if surface == "icon" or surface == "square" then
+        if key == "strong" then return false end
+        local inst = CreateIndicatorInstance and CreateIndicatorInstance(auraName, surface)
+        if not inst then return false end
+        inst.pihSignal  = key
+        inst.othersOnly = true   -- per INSTANCE on this path; see pihCreateSignal
+        if surface == "square" then
+            -- Colourless carry falls back to the signal's default, same as the frame branch
+            -- below -- the store's default square is white.
+            local c = carried and carried.colour
+            if not c then
+                local d = PIH_SIGNALS[key] and PIH_SIGNALS[key].color
+                c = d and { r = d[1], g = d[2], b = d[3], a = 1 } or nil
+            end
+            if c then inst.color = { r = c.r, g = c.g, b = c.b, a = c.a or 1 } end
+        end
+        return true
+    end
     local cfg = EnsureTypeConfig(auraName, surface, pihOtherPoolWrite())
     if not cfg then return false end
     cfg.pihSignal  = key
@@ -749,7 +824,15 @@ local function pihPlace(key, auraName, surface, carried)
     cfg.othersOnly = true
     cfg.enabled    = true
     cfg.conditions = carried and carried.conditions or nil
+    -- No colour to carry (an Icon has none) falls back to the signal's OWN default, exactly
+    -- like fresh creation -- the alternative was the store's default, which is WHITE:
+    -- field-found as "the border didn't appear", because a thin white ring on a path where
+    -- every border had been gold is a border nobody can see.
     local c = carried and carried.colour
+    if not c then
+        local d = PIH_SIGNALS[key] and PIH_SIGNALS[key].color
+        c = d and { r = d[1], g = d[2], b = d[3], a = 1 } or nil
+    end
     if c then cfg[pihColorKey(surface)] = { r = c.r, g = c.g, b = c.b, a = c.a or 1 } end
     if surface == "healthbar" then cfg.mode = "Tint" end   -- same reason as pihCreateSignal
     return true
@@ -784,6 +867,20 @@ function P.PIH_SetSurface(key, surface)
         return ok, why
     end
     if hit.typeKey == surface then return true end
+
+    -- ☠ A MOVE TOUCHING A PLACED REPRESENTATION takes the simple route: capture,
+    -- delete, recreate on the same record. No swap machinery -- instances are per-id and
+    -- never contend -- and the frame-swap path below would try to nil a frame key the
+    -- instance does not live under.
+    if hit.indicatorID or surface == "icon" or surface == "square" then
+        local carried = pihCapture(hit)
+        pihDeleteSignal(key)
+        if not pihPlace(key, hit.auraName, surface, carried) then
+            return false, "could not create the effect"
+        end
+        pihRefresh()
+        return true
+    end
 
     local pool = pihOtherPoolRead()
     local auraCfg = pool and pool[hit.auraName]
