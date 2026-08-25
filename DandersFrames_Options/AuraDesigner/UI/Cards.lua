@@ -630,31 +630,23 @@ end
 
 -- The dropdown's option set, rebuilt per signal because what is available depends on where the
 -- other two are sitting.
--- ☠ A TAKEN SURFACE IS GREYED, NOT REMOVED. `header = true` renders a menu row non-clickable
--- and the dim colour is the addon's unavailable treatment -- so the option stays on screen
--- carrying the reason it cannot be picked. Dropping the row instead would leave someone
--- wondering where Border went.
+-- ⭐ EVERY SURFACE IS LISTED, AND AN OCCUPIED ONE SAYS WHAT PICKING IT DOES.
 function P.PIH_SurfaceOptions(key)
     local labels = S.FRAME_LEVEL_LABELS or {}
     local opts = { _order = {} }
     for _, surface in ipairs(PIH_SURFACE_ORDER) do
-        -- ⚠ A TAKEN SURFACE IS LEFT OUT, NOT GREYED -- and the first attempt at greying it was
-        -- a misuse of somebody else's mechanism. `header = true` is the dropdown's GROUP LABEL
-        -- treatment, not a disabled state: it uppercases the text, shrinks it to 0.85, draws a
-        -- separator above it, and -- the part that gave the game away in testing -- sets a flag
-        -- that INDENTS EVERY ROW BELOW IT. So one unavailable entry turned the rest of the menu
-        -- into its children. The widget has no disabled-row concept at all; `header` is the only
-        -- thing that stops a row being clickable, and it costs all of the above.
+        -- Naming the swap is what makes a taken row honest. Two earlier answers were worse and
+        -- are worth knowing about before anyone changes this back:
         --
-        -- ☠ Leaving it out is the honest option of the two available. The addon's rule is grey a
-        -- FEATURE TOGGLE'S dependants and hide what does not apply -- and a surface another
-        -- signal is sitting on genuinely does not apply, because a record holds one effect per
-        -- surface. The reason is not lost either: the signal holding it shows that surface in
-        -- its own dropdown, one row up.
-        -- ⭐ SO EVERY SURFACE IS LISTED, AND THE OCCUPIED ONE SAYS WHAT PICKING IT DOES.
-        -- Hiding it was the previous answer and the user rejected it for the right reason: a
-        -- missing row reads as "that was never possible", when in fact it is possible and simply
-        -- taken. Naming the swap turns a dead entry into an honest one.
+        -- ☠ GREYING IT IS NOT AVAILABLE. The dropdown has no disabled-row concept. `header = true`
+        -- is the only thing that stops a row being clickable, and it is the GROUP LABEL treatment,
+        -- not a disabled state: it uppercases the text, shrinks it to 0.85, draws a separator, and
+        -- sets a flag that INDENTS EVERY ROW BELOW IT -- so one unavailable entry turned the rest
+        -- of the menu into its children. Asked for as a real `disabled` row; until it exists,
+        -- greying here is a misuse of somebody else's mechanism.
+        --
+        -- ⚠ HIDING IT WAS THE OTHER ANSWER, and the user rejected it for the right reason: a
+        -- missing row reads as "that was never possible", when it is possible and simply taken.
         local label   = labels[surface] or surface
         local takenBy = pihSurfaceTakenBy(surface, key)
         opts[surface] = takenBy and format(L["%s (swap with %s)"], label, pihLabel(takenBy)) or label
@@ -3609,9 +3601,10 @@ S.BuildEffectsTab = function()
             -- characters per line "to be safe"; the truth at this panel's width is nearer 68, so
             -- every note claimed twice the lines it needed and left visible gaps above the first
             -- tick and below the last note -- field-reported with a screenshot 2026-08-24.
-            -- 8px per character is a shade wider than the font actually renders, so the count
-            -- still errs toward MORE lines, which is the safe direction; and because it reads the
-            -- width, it stays right when the panel is resized rather than only at one size.
+            -- The per-character width is deliberately a shade wider than the font renders, so the
+            -- count errs toward MORE lines, which is the safe direction; and because it reads the
+            -- panel width it stays right when the panel is resized, not only at one size. The
+            -- measured figure and why it is rounded up are on the constant below.
             -- The byte count makes an em dash worth three, which errs the same way.
             -- Delete all of this the day the column publishes a `dfAD_ReflowWidgets` seam.
             local PIH_NOTE_LINE = 13
@@ -3623,10 +3616,10 @@ S.BuildEffectsTab = function()
             -- asked for 8 lines to hold 5.
             -- ⚠ 6 rather than 5.4 on purpose: it still errs long, by roughly a line on a
             -- paragraph, and that line is the margin a longer translation gets to grow into.
-            -- ☠ Do NOT try to verify this from the widget. `/dfpi layout` showed every note
-            -- reporting a height of 30 whatever its text, because a pinned label's frame never
-            -- grows -- the FontString simply draws past it. The slot IS the layout here; the
-            -- frame height is not evidence of anything.
+            -- ☠ Do NOT try to verify this from the widget. A probe that dumped every note's
+            -- measured height reported 30 for all of them whatever the text, because a pinned
+            -- label's frame never grows -- the FontString simply draws past it. The slot IS the
+            -- layout here; the frame height is not evidence of anything.
             local function pihLines(text)
                 local cpl = math.max(20, math.floor(PIH_NOTE_W / 6))
                 -- ⚠ Colour escapes are not characters anyone can see. Counting them would add
