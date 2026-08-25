@@ -675,11 +675,15 @@ end
 -- HELPER GATE (Power Infusion helper) -- THE PUSH CHOKEPOINT
 -- ============================================================
 -- ☠ WHY THE GATE LIVES HERE AND NOWHERE ELSE.
--- Every engine write of candidate filters for group/overlay/row containers funnels through
--- recordCandidateFilters below: `_build` (:3141) declaring groups, and `applyGroupTuning`
--- (:3556) pushing the cfByKey map. Two sites, and nothing reaches the engine except through
--- one of them. (Two further readers -- the `cfOf` closure at :3336 and the diagnostic dump
--- at :8542 -- are debug-only and never reach the engine.)
+-- Every engine write of candidate filters funnels through ONE of TWO lanes:
+--   * group/overlay/row containers: recordCandidateFilters below, reached from `_build`
+--     (declaring groups) and `applyGroupTuning` (pushing the cfByKey map).
+--   * SLOT handles (placed icons/squares/bars): SlotHandle:_cf(), the slot lane's twin,
+--     which every slot-path push reads instead of the raw `_lastCandidateFilters` stash.
+-- Nothing reaches the engine except through one of the two. (The `cfOf` closure and the
+-- diagnostic dump are debug-only readers and never reach the engine.) The slot lane exists
+-- because AcquireSlot bypasses this funnel entirely -- without it the same placed indicator
+-- was gated when built out of combat (the Create fallback) and ungated when built in it.
 --
 -- Gating HERE rather than in stored config is the whole design:
 --   * Stored config always carries the LIVE map, so no signature ever lies and the Factory
@@ -6163,6 +6167,18 @@ function AuraContainer.SetHelperGate(dark)
             if ok then n = n + 1 end
         end
     end
+    -- ☠ SLOTS TOO, NARROWED TO OURS. SetAuraSlotCandidateFilters has no engine-side
+    -- equality guard -- every call clears and re-parses -- so an unnarrowed walk would
+    -- re-parse every placed indicator in the addon per gate flip. Read off the module table,
+    -- not a local: the registry is declared thousands of lines below this function, and a
+    -- later-declared local here would silently read as a nil global (this file has been
+    -- bitten by exactly that; see the note above GateAppliesTo).
+    for h in pairs(AuraContainer._slotHandles or {}) do
+        if h.config and h.config.dfGate and h._applyHelperGate then
+            local ok, applied = pcall(h._applyHelperGate, h)
+            if ok and applied then n = n + 1 end
+        end
+    end
     return n
 end
 
@@ -7330,8 +7346,12 @@ function AuraContainer:AcquireSlot(frame, slotKey, spec)
         owner = owner, key = slotKey, liveFilter = filter, parked = false, config = config,
     }, SlotHandle)
 
+    -- Stashed BEFORE the declare so the declare can read through _cf(): a helper-owned
+    -- slot born while the gate is dark must be born gated, not corrected one push later.
+    handle._lastCandidateFilters = spec.candidateFilters
+
     local okS, btn = pcall(owner.container.AddAuraSlot, owner.container, slotKey, filter, {
-        candidateFilters = spec.candidateFilters,
+        candidateFilters = handle:_cf(),
         sortMethod       = spec.sortMethod,
         sortDirection    = spec.sortDirection,
         initializeFrame  = function(b)
@@ -7415,7 +7435,6 @@ function AuraContainer:AcquireSlot(frame, slotKey, spec)
     -- reach a first paint before then.
     handle._idGateVulnerable    = filterVulnerableToIdentityGate(filter, spec.candidateFilters)
     handle._idGateSourceRelative = filterSourceRelative(filter, spec.candidateFilters)
-    handle._lastCandidateFilters = spec.candidateFilters
     handle:_applyIdentityGate()
     -- ☠ SEED THE LATCHES TOO — both are edge-driven, and a slot born AFTER the edge hears
     -- nothing. SetUnitDeathLatched / CineLatchAll loop the registries at the transition;
@@ -7684,7 +7703,7 @@ function SlotHandle:_setCineLatch(on, skipReparse)
     elseif wantReparse then
         local c = self.owner and self.owner.container
         if c then
-            pcall(c.SetAuraSlotCandidateFilters, c, self.key, self._lastCandidateFilters)
+            pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf())
         end
     end
 end
@@ -7706,7 +7725,7 @@ function SlotHandle:_setDeathLatch(on)
     end
     if not on and self._lastCandidateFilters ~= nil then
         local c = self.owner and self.owner.container
-        if c then pcall(c.SetAuraSlotCandidateFilters, c, self.key, self._lastCandidateFilters) end
+        if c then pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf()) end
     end
 end
 
@@ -7743,7 +7762,7 @@ function SlotHandle:_noteGateRecovery(can)
         registerSlotRegen(self)
         return
     end
-    pcall(c.SetAuraSlotCandidateFilters, c, self.key, self._lastCandidateFilters)
+    pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf())
     -- After the bounce, matching the Handle: the slot un-parks already re-parsed.
     -- skipReparse: the candidate re-push above IS that bounce.
     self:_setCineLatch(nil, true)
@@ -7878,7 +7897,7 @@ function SlotHandle:ApplyTuning(filter, candidateFilters, sortMethod, sortDirect
     -- only one of them leaves a slot flagged from its previous configuration. Pure stored
     -- state, so it is correct to do even in lockdown -- only the secure pushes defer.
     if filterChanged or candidatesChanged then
-        local cf = self._lastCandidateFilters
+        local cf = self._lastCandidateFilters   -- RAW on purpose -- see _cf()'s header
         self._idGateVulnerable    = filterVulnerableToIdentityGate(self.liveFilter, cf)
         self._idGateSourceRelative = filterSourceRelative(self.liveFilter, cf)
     end
@@ -7891,7 +7910,10 @@ function SlotHandle:ApplyTuning(filter, candidateFilters, sortMethod, sortDirect
         return false
     end
     if candidatesChanged then
-        pcall(c.SetAuraSlotCandidateFilters, c, self.key, candidateFilters)
+        -- Through _cf(): the argument is the LIVE map by definition, and a tuning pass on a
+        -- gated-dark slot must not un-gate it -- the same clobber the container lane's
+        -- chokepoint design exists to prevent.
+        pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf())
     end
     -- Re-evaluate before pushing, so a slot that just became vulnerable is dark on the
     -- very first pass rather than showing one frame of the wrong player's auras.
@@ -7925,7 +7947,10 @@ function SlotHandle:_replayTuning()
     local c = self.owner and self.owner.container
     if not c then return end
     if self._lastCandidateFilters ~= nil then
-        pcall(c.SetAuraSlotCandidateFilters, c, self.key, self._lastCandidateFilters)
+        -- Through _cf(), not the raw stash: this replay is the combat-exit drain for every
+        -- deferred push, including the helper gate's own -- raw here meant a gated slot
+        -- came out of combat un-gated.
+        pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf())
     end
     -- Verdict first (population order matches ApplyTuning): a slot that became
     -- vulnerable during combat must come out of it dark, not flash one frame open.
@@ -7935,6 +7960,50 @@ function SlotHandle:_replayTuning()
         pcall(c.SetAuraSlotSortMethod, c, self.key, self._lastSortMethod,
             self._lastSortDirection or 0)
     end
+end
+
+-- ═══ HELPER GATE: THE SLOT LANE ═══
+-- The slot-path twin of recordCandidateFilters: same test, same dead map, derived at READ
+-- time. The stash itself is never overwritten -- destroying the live map is the failure the
+-- container lane's design already rejected, and here it would also strand the recovery
+-- edge, which treats "no filter list" as "nothing to repair" and fires exactly once.
+--
+-- ⚠ NIL-FAITHFUL BY CONSTRUCTION: returns nil exactly when the stash is nil, never
+-- otherwise. Every nil test at the read sites keeps its meaning, and the recovery edge can
+-- never be burned by a gated slot that has a real selection.
+--
+-- ⚠ THE ONE READ THAT STAYS RAW is ApplyTuning's vulnerability recompute:
+-- _idGateVulnerable is a property of the user's REAL selection, and deriving it from the
+-- dead map would drop a gated-dark slot out of the cinematic-latch population -- it would
+-- come back from a cutscene fail-open.
+--
+-- ☠ CANDIDATE LANE ONLY. The identity gate's verdicts actuate through the shared
+-- owner anchor because gate/cine/death are UNIT-level facts (see _pushFilter). Ours is
+-- per-EFFECT -- one helper icon beside a user's own indicator on the same unit -- so it
+-- must never touch the anchor or the filter string.
+function SlotHandle:_cf()
+    local cf = self._lastCandidateFilters
+    if cf ~= nil and self.config and self.config.dfGate
+        and (helperGateDark or helperRoleExcluded(self.owner and self.owner.unit)) then
+        return HELPER_GATE_DEAD_CF
+    end
+    return cf
+end
+
+-- One gate edge, one slot: re-push the (now re-derived) candidates. The lockdown branch is
+-- the recovery path's own shape -- no native tuning setter runs in combat, and
+-- _replayTuning drains the deferral on the way out, itself reading through _cf().
+function SlotHandle:_applyHelperGate()
+    if self._lastCandidateFilters == nil then return false end
+    local c = self.owner and self.owner.container
+    if not c then return false end
+    if InCombatLockdown() then
+        self._pendingTuning = true
+        registerSlotRegen(self)
+        return true
+    end
+    pcall(c.SetAuraSlotCandidateFilters, c, self.key, self:_cf())
+    return true
 end
 
 -- In-place cosmetic restyle, mirroring Handle:ApplyStyle. Re-runs the engine's region
