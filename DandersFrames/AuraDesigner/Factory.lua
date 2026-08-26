@@ -978,8 +978,20 @@ local AD_TEXT_CHAIN_GATE_OFFSET = 30
 -- SHOW-WHEN-MISSING IS NOT STAMPED, deliberately. applyGroupTuning early-returns on
 -- mode == "missing", so a missing-mode container cannot be live-gated at all; stamping it
 -- would advertise a gate that never fires. The helper does not offer SWM on gated effects.
+-- ☠ THE INFUSED SIGNAL IS EXEMPT FROM THE GATE, and the exemption is the signal.
+-- Casting Power Infusion is what starts its cooldown, so "someone has my Power Infusion" is
+-- only ever true while the gate is dark -- a gated infused mark turns on and is hidden in the
+-- same instant, every time (field-found: the violet was invisible until the gate was switched
+-- off). Ungated, it shows where the buff went for its 15 seconds while everything else stays
+-- hidden. The exemption also skips the role exclusions, accepted: "this player genuinely has
+-- Power Infusion" is true whatever their role. One predicate so the rule cannot drift apart
+-- across the stamp sites.
+local function gateOwns(sig)
+    return (sig and sig ~= "infused") and true or nil
+end
+
 local function stampGate(config, src)
-    if config and src and src.pihSignal then config.dfGate = true end
+    if config and src and gateOwns(src.pihSignal) then config.dfGate = true end
     return config
 end
 
@@ -2143,8 +2155,9 @@ end
 local function buildPlacedConfig(frame, unit, map, indicator, isSquare, borderSpec, defs, mine)
     return {
         -- Helper ownership: this builder already holds the effect config, so it stamps itself
-        -- rather than being wrapped by its callers. See stampGate.
-        dfGate = indicator.pihSignal and true or nil,
+        -- rather than being wrapped by its callers. See stampGate (and gateOwns for why the
+        -- infused signal is exempt).
+        dfGate = gateOwns(indicator.pihSignal),
         unit = unit,
         mode = "row",
         max = 1,
@@ -2585,7 +2598,7 @@ end
 -- the icon/square placed indicators — resolveLevel's absolute value, nothing added.
 local function buildBarConfig(frame, unit, map, indicator, borderSpec, defs, mine)
     return {
-        dfGate = indicator.pihSignal and true or nil,   -- stamps itself; see stampGate
+        dfGate = gateOwns(indicator.pihSignal),   -- stamps itself; see stampGate + gateOwns
         unit = unit,
         mode = "row",
         max = 1,
@@ -3345,7 +3358,7 @@ local function buildFilterGroupConfig(frame, map, group, mine, defs)
     local borderSpec = buildGroupBorderSpec(frame, group)
     local filt = poolFilter(group, mine)
     return {
-        dfGate = group.pihSignal and true or nil,   -- stamps itself; see stampGate
+        dfGate = gateOwns(group.pihSignal),   -- stamps itself; see stampGate + gateOwns
         unit = frame.unit,
         mode = "row",
         max = math.max(1, tonumber(group.maxIcons) or 8),

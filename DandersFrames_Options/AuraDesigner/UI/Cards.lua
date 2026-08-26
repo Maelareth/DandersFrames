@@ -367,7 +367,19 @@ end
 -- The group is ordinary Layout Groups data marked with pihSignal -- the same doctrine as the
 -- effects: the marks ARE the record. Hand-deleting it from the Layout Groups tab reads as
 -- the tick going off, and nothing is left holding a contrary opinion.
-local function pihIconGroup()
+-- Two groups, found by their mark: "burst" is the shared cooldowns/amplifiers row
+-- (others-only), "infused" is its own one-icon group -- SEPARATE because one container has
+-- ONE caster rule, and infused needs the opposite rule from everything else (own casts
+-- allowed; it IS an own cast). User's design, second group session.
+local function pihIconGroup(sig)
+    local groups = P.GetOtherLayoutGroups and P.GetOtherLayoutGroups(false)
+    for _, g in ipairs(groups or {}) do
+        if type(g) == "table" and g.pihSignal == (sig or "burst") then return g end
+    end
+    return nil
+end
+
+local function pihAnyIconGroup()
     local groups = P.GetOtherLayoutGroups and P.GetOtherLayoutGroups(false)
     for _, g in ipairs(groups or {}) do
         if type(g) == "table" and g.pihSignal then return g end
@@ -379,7 +391,7 @@ end
 -- icons stay on would flip the card back to "Add" and hide the panel -- stranding a running
 -- group with no control left that can reach it.
 function P.PIH_Exists()
-    return next(pihFound()) ~= nil or pihIconGroup() ~= nil
+    return next(pihFound()) ~= nil or pihAnyIconGroup() ~= nil
 end
 
 -- "On" means "shows somewhere": a colour effect, the icon group, or both. This is what lets
@@ -525,9 +537,10 @@ local function pihCreateSignal(key, surfaceOverride)
         if not inst then return false, "could not create the indicator" end
         inst.pihSignal = key
         -- ⚠ OTHERS ONLY IS PER INSTANCE on the placed path -- poolFilter reads it off
-        -- the indicator, not the record. Forgetting it here is the My-Buffs-pool trap for
-        -- the THIRD time: the icon would light on the priest's own casts.
-        inst.othersOnly = true
+        -- the indicator, not the record. Forgetting it is the My-Buffs-pool trap; but see
+        -- pihCreateSignal's frame branch for why INFUSED must be the exception -- with it,
+        -- that signal could never fire at all.
+        inst.othersOnly = (key ~= "infused") or nil
         -- A square has a colour; an icon shows the aura's own artwork.
         if tgt == "square" then
             inst.color = { r = def.color[1], g = def.color[2], b = def.color[3], a = 1 }
@@ -556,10 +569,14 @@ local function pihCreateSignal(key, surfaceOverride)
     -- repaints the whole bar and covers every other tint -- the exact collision the panel's
     -- own note says cannot happen. Tint is the mode that stacks. Only healthbar has a mode.
     if tgt == "healthbar" then cfg.mode = "Tint" end
-    -- ⚠ OTHERS ONLY. Twins of the Sun Priestess is near-always taken and copies every Power
-    -- Infusion cast back onto the priest, so an any-caster mark would light our own frame
-    -- after every cast.
-    cfg.othersOnly = true
+    -- ⚠ OTHERS ONLY -- EXCEPT FOR INFUSED, AND THE EXCEPTION IS THE SIGNAL. For the
+    -- cooldown signals, "cast by someone else" is what makes them about OTHER PLAYERS (and
+    -- keeps Twins of the Sun Priestess from lighting our own frame after every cast). But
+    -- Power Infusion on a teammate is ALWAYS the priest's own cast -- an others-only infused
+    -- mark filters out the one thing it exists to show. Field-found in the second group
+    -- session: the violet had never rendered anywhere, since the day it was built. Twins
+    -- copying PI onto the priest now lights their own frame violet, which is simply true.
+    cfg.othersOnly = (key ~= "infused") or nil
     cfg.enabled = true
     cfg.conditions = conditions   -- nil on purpose for the unchained signals: clears a stale chain
     return true
@@ -804,7 +821,7 @@ local function pihPlace(key, auraName, surface, carried)
         local inst = CreateIndicatorInstance and CreateIndicatorInstance(auraName, surface)
         if not inst then return false end
         inst.pihSignal  = key
-        inst.othersOnly = true   -- per INSTANCE on this path; see pihCreateSignal
+        inst.othersOnly = (key ~= "infused") or nil   -- infused = own cast; see pihCreateSignal
         if surface == "square" then
             -- Colourless carry falls back to the signal's default, same as the frame branch
             -- below -- the store's default square is white.
@@ -821,7 +838,7 @@ local function pihPlace(key, auraName, surface, carried)
     if not cfg then return false end
     cfg.pihSignal  = key
     cfg.label      = pihLabel(key)
-    cfg.othersOnly = true
+    cfg.othersOnly = (key ~= "infused") or nil   -- infused = own cast; see pihCreateSignal
     cfg.enabled    = true
     cfg.conditions = carried and carried.conditions or nil
     -- No colour to carry (an Icon has none) falls back to the signal's OWN default, exactly
@@ -1024,8 +1041,9 @@ end
 -- ⚠ ADDING TURNS ON ONE SIGNAL. Not everything it could build: a click that produces three
 -- indicators the user did not choose is a click that has decided for them, and two of the three
 -- are situational. Burst window is the one that is always worth having.
--- The Layout Groups name is stored data, like the three filter names -- raw, never L[].
+-- The Layout Groups names are stored data, like the three filter names -- raw, never L[].
 local PIH_ICON_GROUP_NAME = "PI Helper — Cooldown icons"
+local PIH_INFUSED_GROUP_NAME = "PI Helper — Infused icon"
 
 -- The three lists the icons box can show. State is READ OFF THE GROUP'S OWN SELECTION --
 -- one tick per list, no stored copy -- so editing the group by hand on the Layout Groups tab
@@ -1037,7 +1055,8 @@ local PIH_ICON_LIST_NAMES = {
 }
 
 function P.PIH_IconsShow(which)
-    local g = pihIconGroup()
+    if which == "infused" then return pihIconGroup("infused") ~= nil end
+    local g = pihIconGroup("burst")
     if not (g and g.filterSelection and g.filterSelection.customs) then return false end
     local id = pihFilterIdByName(PIH_ICON_LIST_NAMES[which])
     return (id and g.filterSelection.customs[id]) and true or false
@@ -1045,7 +1064,34 @@ end
 
 function P.PIH_SetIconsShow(which, on)
     if not PIH_ICON_LIST_NAMES[which] then return false, "no such list" end
-    local g = pihIconGroup()
+
+    -- ☠ INFUSED IS ITS OWN GROUP -- one icon, own position, and the OPPOSITE caster
+    -- rule from the shared row (own casts allowed: it IS an own cast). Existence is the
+    -- state; the last thing to derive is nothing.
+    if which == "infused" then
+        local ig = pihIconGroup("infused")
+        if not on then
+            if ig and P.DeleteLayoutGroup then P.DeleteLayoutGroup(ig.id) end
+            pihRefresh()
+            return true
+        end
+        if ig then return true end
+        local id = pihEnsureFilter(PIH_FILTERS.infused, nil, { PIH_PI_SPELL_ID })
+        if not (id and P.CreateLayoutGroup) then return false, "could not build the list" end
+        ig = P.CreateLayoutGroup(PIH_INFUSED_GROUP_NAME, "filter")
+        if not ig then return false, "could not create the group" end
+        ig.pihSignal = "infused"
+        -- NO othersOnly here, on purpose -- the whole reason this group exists apart.
+        ig.maxIcons = 1
+        ig.iconsPerRow = 1
+        -- The other corner, so the two icon groups never overlap at their defaults.
+        ig.anchor = "TOPRIGHT"
+        ig.filterSelection.customs[id] = true
+        pihRefresh()
+        return true
+    end
+
+    local g = pihIconGroup("burst")
 
     if not on then
         if not g then return true end
@@ -1176,10 +1222,13 @@ function P.PIH_Remove()
         end
     end
 
-    -- The icon group goes with the signals: it is the burst signal in another shape, and a
+    -- The icon groups go with the signals: they are the signals in another shape, and a
     -- helper that no longer exists must not leave icons running.
-    local ig = pihIconGroup()
-    if ig and P.DeleteLayoutGroup then P.DeleteLayoutGroup(ig.id) end
+    local ig = pihAnyIconGroup()
+    while ig and P.DeleteLayoutGroup do
+        P.DeleteLayoutGroup(ig.id)
+        ig = pihAnyIconGroup()
+    end
 
     -- ☠ SOUND IS NOT A CONTAINER, so nothing above reaches it. Removing the helper has to
     -- silence it explicitly or the announcements outlive the feature that made them.
@@ -3998,7 +4047,12 @@ S.BuildEffectsTab = function()
                 -- "Surface" over every row would triple the words for no added meaning.
                 g:AddWidget(GUI:CreateDropdown(parent, label, P.PIH_SurfaceOptions(key),
                     nil, nil, nil,
-                    function() return P.PIH_SurfaceOf(key) end,
+                    -- ⚠ NEVER nil: this widget survives a profile switch for one frame,
+                    -- and the shared dropdown's display refresh treats a nil answer as "try
+                    -- the saved-variable fallback", which was never given -- a Lua error on
+                    -- every profile switch away from the helper. "none" is a value the menu
+                    -- owns, so a dying row reads honestly until it is rebuilt away.
+                    function() return P.PIH_SurfaceOf(key) or "none" end,
                     function(v)
                         P.PIH_SetSurface(key, v)
                         S.SwitchTab("effects")   -- the other rows' menus re-grey around it
@@ -4148,7 +4202,7 @@ S.BuildEffectsTab = function()
                 pihNote(g, L["Border and Text colours show only one at a time."])
                 -- The one navigational fact text is genuinely needed for. Only while the
                 -- icon group exists: position is not a question about icons that are not there.
-                if pihIconGroup() then
+                if pihAnyIconGroup() then
                     pihNote(g, L["Move and size the icons under Layout Groups."])
                 end
             end)
