@@ -213,14 +213,21 @@ end
 -- ☠ SKIPS THE RESOLVE WHEN NOTHING COULD PLAY. With no sound chosen -- the shipped
 -- default -- arming would resolve the whole spell list and walk every frame just to register
 -- nothing. The DISARM pass still walks: teardown is the thing that actually silences.
+-- The last arm pass, remembered for the status readout: how many registrations, over how
+-- many frames, and when. ☠ A field failure ("no sound in the dungeon after a reload")
+-- arrived with a readout that showed every SETTING healthy -- because the readout could not
+-- see the per-frame wiring. These three numbers are what would have named it in one look.
+local pihLastArmCount, pihLastArmFrames, pihLastArmAt = 0, 0, nil
+
 local function pihSoundsArmed(armed)
     local Factory = DF.AuraDesigner and DF.AuraDesigner.Factory
     if not (Factory and Factory.SetHelperSoundsArmed) then return 0 end
     if armed and not pihSoundCfg then armed = false end
     local map = armed and pihResolvedMap() or nil
-    local n = 0
+    local n, frames = 0, 0
     local function visit(frame)
         if frame and DF:IsAuraDesignerEnabled(frame) then
+            frames = frames + 1
             local got = Factory:SetHelperSoundsArmed(frame, armed, map, pihSoundCfg)
             n = n + (got or 0)
         end
@@ -228,6 +235,8 @@ local function pihSoundsArmed(armed)
     if DF.IteratePartyFrames  then DF:IteratePartyFrames(visit)  end
     if DF.IterateRaidFrames   then DF:IterateRaidFrames(visit)   end
     if DF.IteratePinnedFrames then DF.IteratePinnedFrames(visit) end
+    pihLastArmCount, pihLastArmFrames = n, frames
+    pihLastArmAt = date and date("%H:%M:%S") or "?"
     return n
 end
 
@@ -616,8 +625,8 @@ SlashCmdList["DFPI"] = function(msg)
     if DF.AuraContainer and DF.AuraContainer.GetHelperGate then
         dark = DF.AuraContainer.GetHelperGate()
     end
-    DF:Out("PI Helper", "status")
-        :Field("gate intends", pihGateOpen and "OPEN" or "DARK")
+    local out = DF:Out("PI Helper", "status")
+    out:Field("gate intends", pihGateOpen and "OPEN" or "DARK")
         :Field("chokepoint says", dark and "DARK" or "OPEN",
                dark == (not pihGateOpen) and "good" or "bad")
         :Field("gate enabled", tostring(pihGateEnabled))
@@ -649,9 +658,33 @@ SlashCmdList["DFPI"] = function(msg)
             return table.concat(t, ", ")
         end)())
         :Field("watching events", pihWatching and "yes" or "no (no helper installed)")
-        -- ⚠ applyGroupTuning refuses in test mode, so a gate edge redraws nothing
-        -- there -- indistinguishable from a broken gate unless the readout says so.
-        :Line((DF.testMode or DF.raidTestMode)
-            and "test mode is ON: gate changes do not redraw test previews" or nil, "neutral")
-        :Hints("/df debug pi off", "/df debug pi on", "/df debug pi auto")
+        -- The per-frame wiring, which no setting above can show. Registrations counted at the
+        -- LAST arm pass (armed on zero frames = the login-ordering failure); containers
+        -- counted LIVE off both registries.
+        :Field("sound registrations", ("%d over %d frame%s%s"):format(
+            pihLastArmCount, pihLastArmFrames, pihLastArmFrames == 1 and "" or "s",
+            pihLastArmAt and (" (last armed " .. pihLastArmAt .. ")") or ""),
+            (pihSoundCfg and pihGateOpen and pihLastArmCount == 0) and "bad" or "neutral")
+        :Field("gated containers live", (function()
+            local AC = DF.AuraContainer
+            local n = 0
+            for h in pairs((AC and AC._handles) or {}) do
+                if h.config and h.config.dfGate then n = n + 1 end
+            end
+            for h in pairs((AC and AC._slotHandles) or {}) do
+                if h.config and h.config.dfGate then n = n + 1 end
+            end
+            return n
+        end)())
+    -- ☠ The chain is REASSEMBLED here on purpose: a conditional line built as
+    -- `cond and text or nil` fed a nil straight into the printer's concatenation and the
+    -- readout crashed in the field -- precisely when test mode was OFF, which no dev session
+    -- ever ran it in. A diagnostic must not have a state in which it throws.
+    local out2 = out
+    if DF.testMode or DF.raidTestMode then
+        -- applyGroupTuning refuses in test mode, so a gate edge redraws nothing there --
+        -- indistinguishable from a broken gate unless the readout says so.
+        out2 = out2:Line("test mode is ON: gate changes do not redraw test previews", "neutral")
+    end
+    out2:Hints("/df debug pi off", "/df debug pi on", "/df debug pi auto")
 end
