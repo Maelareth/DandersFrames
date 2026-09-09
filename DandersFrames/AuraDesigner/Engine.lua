@@ -206,12 +206,53 @@ end
 -- resolve -- taking the first is a choice, not a derivation. Party first because that is where
 -- the feature is used. A preset whose settings table survived a Remove no longer shadows one
 -- that actually has a helper, because the marks decide.
+-- Held between runs of the sound probe: a registration whose REMOVAL was blocked is still live,
+-- and dropping its id is the exact defect being measured. nil when nothing is held.
+local pihProbeLeakedID = nil
+
+-- ☠ THE RESTRICTION STATE, READ CORRECTLY. Both probes used to pass STRINGS to
+-- `C_RestrictedActions.IsAddOnRestrictionActive`, which takes an `Enum.AddOnRestrictionType`
+-- value. A string is not nil, so the call returned truthy for every kind and the readout listed
+-- all five as active -- in a capital city as readily as on a boss. Two runs then disagreed while
+-- both claimed the same state, which is what exposed it.
+-- ⚠ A LABEL THAT IS ALWAYS TRUE IS WORSE THAN NO LABEL: it does not merely fail to
+-- inform, it actively certifies the wrong conclusion. The first in-combat run "passed in
+-- Combat+Encounter+ChallengeMode+PvPMatch" and was very likely in none of them.
+local function pihRestrictions()
+    local out = {}
+    local kinds = Enum and Enum.AddOnRestrictionType
+    if kinds and C_RestrictedActions and C_RestrictedActions.IsAddOnRestrictionActive then
+        for _, name in ipairs({ "Combat", "Encounter", "ChallengeMode", "PvPMatch" }) do
+            local v = kinds[name]
+            if v ~= nil then
+                local ok, active = pcall(C_RestrictedActions.IsAddOnRestrictionActive, v)
+                -- Secret-guard BEFORE the comparison, the rule this file already lives by.
+                if ok and not (issecretvalue and issecretvalue(active)) and active == true then
+                    out[#out+1] = name
+                end
+            end
+        end
+    elseif not kinds then
+        out[#out+1] = "enum missing"
+    end
+    if InCombatLockdown and InCombatLockdown() then out[#out+1] = "Lockdown" end
+    return out
+end
+
+-- ☠ WHICH PRESET THE ANSWER CAME FROM, remembered for the readout. Field report
+-- 2026-09-09: "it's using the party settings even if I'm in raid". That is exactly what the loop
+-- below does -- party first, whichever mode you are standing in -- and until now the readout could
+-- not show it, so the behaviour was indistinguishable from a bug in the gate or the roles.
+-- ⚠ A DIAGNOSTIC THAT CANNOT NAME ITS SOURCE turns a known limitation into a mystery.
+local pihSettingsMode = nil
+
 local function pihSettings()
+    pihSettingsMode = nil
     if not DF.GetModeBaseAuraDesigner then return nil end
     for _, mode in ipairs(PIH_MODES) do
         local adDB = DF:GetModeBaseAuraDesigner(mode)
         local s = adDB and adDB.pihelper
-        if s and pihHasHelper(adDB) then return s end
+        if s and pihHasHelper(adDB) then pihSettingsMode = mode; return s end
     end
     return nil
 end
@@ -247,6 +288,14 @@ end
 -- arrived with a readout that showed every SETTING healthy -- because the readout could not
 -- see the per-frame wiring. These three numbers are what would have named it in one look.
 local pihLastArmCount, pihLastArmFrames, pihLastArmAt = 0, 0, nil
+-- ☠ AND WHY IT REGISTERED NOTHING. SetHelperSoundsArmed already returns a reason with
+-- its count -- its own comment says "a bare 0 has six different meanings and they point different
+-- ways" -- and the caller below read only the count and dropped the reason on the floor. A zero
+-- then meant: no sound chosen, or no spells after class narrowing, or every unit role-excluded, or
+-- the list failed to resolve, or the API refused the call. Five different faults, one number,
+-- indistinguishable. Field-found 2026-09-09 on a readout showing 0 registrations with the gate
+-- OPEN and 50 containers gated, which should have been impossible to misread and was not.
+local pihLastArmReasons = nil
 
 local function pihSoundsArmed(armed)
     local Factory = DF.AuraDesigner and DF.AuraDesigner.Factory
@@ -254,17 +303,25 @@ local function pihSoundsArmed(armed)
     if armed and not pihSoundCfg then armed = false end
     local map = armed and pihResolvedMap() or nil
     local n, frames = 0, 0
+    local reasons = {}
     local function visit(frame)
         if frame and DF:IsAuraDesignerEnabled(frame) then
             frames = frames + 1
-            local got = Factory:SetHelperSoundsArmed(frame, armed, map, pihSoundCfg)
+            local got, why = Factory:SetHelperSoundsArmed(frame, armed, map, pihSoundCfg)
             n = n + (got or 0)
+            -- Tally the reason whenever a frame produced nothing. Counted, not listed: forty
+            -- frames saying the same thing is one fact, and printing it forty times buries it.
+            if (got or 0) == 0 then
+                local key = why or "no reason given"
+                reasons[key] = (reasons[key] or 0) + 1
+            end
         end
     end
     if DF.IteratePartyFrames  then DF:IteratePartyFrames(visit)  end
     if DF.IterateRaidFrames   then DF:IterateRaidFrames(visit)   end
     if DF.IteratePinnedFrames then DF.IteratePinnedFrames(visit) end
     pihLastArmCount, pihLastArmFrames = n, frames
+    pihLastArmReasons = next(reasons) and reasons or nil
     pihLastArmAt = date and date("%H:%M:%S") or "?"
     return n
 end
@@ -627,7 +684,7 @@ end)
 -- global slash namespace to document a spelling nobody needed twice. Same shape as /dfarena and
 -- /dfpinned. During development this WAS a bare /dfpi; anyone whose fingers remember that needs
 -- the long form now.
-DF:RegisterDebugSlash("DFPI", "Power Infusion Helper: force the gate open or dark, or show its state", false, "/dfpi")
+DF:RegisterDebugSlash("DFPI", "Power Infusion Helper: \"all\" runs every diagnostic; off / on / auto force the gate", false, "/dfpi")
 SlashCmdList["DFPI"] = function(msg)
     msg = (msg or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
 
@@ -655,6 +712,435 @@ SlashCmdList["DFPI"] = function(msg)
             :Field("containers re-pushed", pihSet(not ready))
         return
     end
+    -- ☠ THE FOCUS PROBE. Asks ONE question the code cannot answer from a desk: does
+    -- "is this unit my focus" survive the 12.1 restrictions? A per-unit narrowing ("only watch
+    -- my focus") would live at the same chokepoint role exclusion already uses, so the machinery
+    -- is a day's work -- but ONLY if the read it rests on is legal inside an encounter. A
+    -- competitor addon carries a fallback for the focus being partly unreadable, which is
+    -- evidence the direct read is not simply fine.
+    --
+    -- ⚠ IT MUST BE ABLE TO SAY YES. A probe that can only report absence proves nothing:
+    -- if every path returned "cannot tell", an unset focus and a sealed read would look
+    -- identical. So it separates "no focus set" from "focus set and readable" from "focus set
+    -- and SEALED", and names the token when it resolves -- that line is the pass.
+    --
+    -- ⚠ AND IT MUST NOT THROW. This is the diagnostic that runs in a raid, and a
+    -- readout with a crashing state is the one mistake this feature has already made once.
+    -- Every unit call is pcall'd and secret-checked BEFORE any boolean use of its result.
+    if msg == "focus" then
+        -- Returns a plain string, never a raw API value: "yes" / "no" / "SEALED" / "ERROR".
+        local function isFocus(unit)
+            local ok, same = pcall(UnitIsUnit, unit, "focus")
+            if not ok then return "ERROR" end
+            if issecretvalue and issecretvalue(same) then return "SEALED" end
+            return same and "yes" or "no"
+        end
+        local function readable(fn, ...)
+            local ok, v = pcall(fn, ...)
+            if not ok then return nil, "ERROR" end
+            if issecretvalue and issecretvalue(v) then return nil, "SEALED" end
+            return v, nil
+        end
+
+        local out = DF:Out("PI Helper", "focus read probe")
+
+        -- The restriction state is the whole point of WHEN you run this, so it is printed
+        -- first and read defensively -- C_RestrictedActions may not exist on every build.
+        local restr = pihRestrictions()
+        out:Field("restrictions", #restr > 0 and table.concat(restr, ", ") or "NONE",
+                  #restr > 0 and "good" or "warn")
+        if #restr == 0 then
+            out:Line("out of combat -- this run proves nothing. Re-run mid-pull.", "warn")
+        end
+
+        local exists = readable(UnitExists, "focus")
+        if exists ~= true then
+            out:Field("focus set", "no", "bad")
+                :Line("Set a focus on a group member, then run this again.", "neutral")
+                :Hints("/df debug pi focus")
+            return
+        end
+        out:Field("focus set", "yes", "good")
+
+        local fname, fnErr = readable(UnitName, "focus")
+        out:Field("focus name", fnErr or tostring(fname), fnErr and "bad" or "good")
+        local fguid, fgErr = readable(UnitGUID, "focus")
+        out:Field("focus GUID", fgErr or (fguid and "readable" or "nil"),
+                  fgErr and "bad" or (fguid and "good" or "warn"))
+
+        -- The scan. Every group token, so the answer covers the units the helper actually marks
+        -- rather than only the one the probe happens to sit on.
+        local tokens = { "player" }
+        local n = (IsInRaid and IsInRaid()) and 40 or 4
+        local prefix = (IsInRaid and IsInRaid()) and "raid" or "party"
+        for i = 1, n do tokens[#tokens+1] = prefix .. i end
+
+        -- ☠ TWO READS, ONE RUN. Focus narrowing and a saved player list are the same
+        -- feature to a user and DIFFERENT reads to us: focus is a token comparison, a list is a
+        -- NAME. `UnitName` can return a secret value (FlatRaidFrames.lua:130), so the addon's
+        -- own answer everywhere else is `GetUnitName(unit, true)` -- "Name-Realm", secret-safe,
+        -- and already how Pinned Frames matches units against a saved set. Probing only the
+        -- focus half would greenlight one feature and leave the other guessing.
+        local matched, tested, sealed, errored = nil, 0, 0, 0
+        local named, nameSealed, sampleName = 0, 0, nil
+        for _, unit in ipairs(tokens) do
+            if readable(UnitExists, unit) == true then
+                tested = tested + 1
+                local r = isFocus(unit)
+                if r == "yes" then matched = unit
+                elseif r == "SEALED" then sealed = sealed + 1
+                elseif r == "ERROR" then errored = errored + 1 end
+
+                local nm, nmErr = readable(GetUnitName, unit, true)
+                if nmErr or type(nm) ~= "string" then nameSealed = nameSealed + 1
+                else
+                    named = named + 1
+                    if not sampleName then sampleName = nm end
+                end
+            end
+        end
+
+        out:Field("group units tested", tested)
+            :Field("focus: sealed reads", sealed, sealed > 0 and "bad" or "good")
+            :Field("focus: errored reads", errored, errored > 0 and "bad" or "good")
+            :Field("names read", ("%d of %d"):format(named, tested),
+                   (tested > 0 and named == tested) and "good" or "bad")
+            :Field("name sample", sampleName or "NONE", sampleName and "good" or "bad")
+
+    -- ⚠ THESE LINES ARE THE VERDICT. Anything above them is context, and the two
+        -- are reported SEPARATELY: one read can survive while the other does not, and collapsing
+        -- them would hide which of the two features is dead.
+        if matched then
+            out:Field("focus resolves to", matched, "good")
+                :Line("PASS (focus) -- \"only watch my focus\" is buildable.", "good")
+        elseif sealed > 0 or errored > 0 then
+            out:Line("FAIL (focus) -- the read is restricted here.", "bad")
+        else
+            out:Line("focus is not a group member -- nothing to match. Focus a party/raid member.", "warn")
+        end
+
+        if tested > 0 and named == tested then
+            out:Line("PASS (names) -- a saved \"never watch\" list is buildable.", "good")
+        else
+            out:Line("FAIL (names) -- names are not readable here; a saved list is not buildable.", "bad")
+        end
+        return
+    end
+
+    -- ☠ EVERYTHING, IN ONE GO. Four diagnostics is three commands too many when the
+    -- person running them is in a raid and screenshotting the results back.
+    --
+    -- Carries the three BUG-CHASING diagnostics only; see the note beside the calls.
+    --
+    -- ⚠ IT RE-ENTERS THIS DISPATCHER rather than holding its own copy of each block.
+    -- A combined command that duplicated them would drift from the individual ones the first
+    -- time either was edited, and then two commands would answer the same question differently
+    -- -- which is the exact failure this feature already had once, with "does a helper exist".
+    --
+    -- ⚠ NOT FOLDED INTO THE BARE COMMAND, deliberately. The sound probe MUTATES: it
+    -- registers a real sound and removes it again. A status readout people run casually must stay
+    -- read-only, so the mutating one is opt-in and stays behind a word.
+    if msg == "all" then
+        local run = SlashCmdList and SlashCmdList["DFPI"]
+        if not run then return end
+        run("")        -- status: gate, sound wiring, containers
+        run("border")  -- what the engine holds for the marks
+        run("sound")   -- MUTATES; its result block lands last, on a timer
+        -- ⚠ THE FOCUS PROBE IS NOT IN HERE. It answers a question about a FEATURE that is
+        -- parked (per-player narrowing), not about any live defect -- and it needs a setup step
+        -- of its own, a focused group member, which is a chore to ask of someone mid-raid who is
+        -- chasing a bug. A combined command earns its place by removing work, so it carries only
+        -- the diagnostics that share the same conditions. `/df debug pi focus` still runs alone.
+        return
+    end
+
+    -- ☠ THE BORDER STORE DUMP. Field report 2026-09-09: the helper's border row reads
+    -- Style: Solid, Border animation: none, and the ring MARCHES anyway. The panel and the store
+    -- disagreeing is the shape of nearly every real defect this feature has had, so this prints
+    -- what the ENGINE holds rather than what the panel draws.
+    --
+    -- ⚠ EFFECT VALUE **AND** GLOBAL DEFAULT, SIDE BY SIDE, because the suspected cause is
+    -- the gap between them: an unset field falls through to `adDB.defaults`, so a control that
+    -- writes nil for "none" is indistinguishable from one never touched -- and inherits. Printing
+    -- only the effect's own value would show a tidy nil and explain nothing.
+    if msg == "border" then
+        local out = DF:Out("PI Helper", "border fields as stored")
+        local mode = (DF.GetCurrentMode and DF:GetCurrentMode()) or "party"
+        out:Field("reading preset for mode", mode)
+
+        local adDB = DF.GetModeBaseAuraDesigner and DF:GetModeBaseAuraDesigner(mode)
+        if type(adDB) ~= "table" then
+            out:Line("no Aura Designer data for this mode.", "bad")
+            return
+        end
+        local defs = type(adDB.defaults) == "table" and adDB.defaults or nil
+        out:Field("global defaults table", defs and "present" or "absent", defs and "neutral" or "warn")
+
+        -- Walk the pool for marked effects. Same derivation pihHasHelper uses, so this cannot
+        -- disagree with "does a helper exist".
+        local found = 0
+        for auraName, auraCfg in pairs(adDB.otherAuras or {}) do
+            if type(auraCfg) == "table" then
+                for typeKey, v in pairs(auraCfg) do
+                    if type(v) == "table" and v.pihSignal then
+                        found = found + 1
+                        out:Section(("%s  [%s]"):format(tostring(typeKey), tostring(v.pihSignal)))
+
+                        -- Every Border* key present on the effect, plus the two that decide
+                        -- whether a border renders at all.
+                        local keys = {}
+                        for k in pairs(v) do
+                            if type(k) == "string" and k:sub(1, 6) == "Border" then keys[#keys+1] = k end
+                        end
+                        table.sort(keys)
+                        out:Item("ShowBorder", tostring(v.ShowBorder))
+                        out:Item("borderMode", tostring(v.borderMode))
+                        if #keys == 0 then
+                            out:Item("Border* fields", "NONE STORED -- every one inherits", "warn")
+                        end
+                        for _, k in ipairs(keys) do
+                            out:Item(k, tostring(v[k]))
+                        end
+
+                        -- ⚠ THE ANIMATION KEYS SPECIFICALLY, whether stored or not, with
+                        -- what the global layer would supply. A blank effect value beside a
+                        -- non-NONE default IS the bug, printed rather than argued.
+                        for _, k in ipairs({ "BorderAnimationType", "BorderAnimationThickness",
+                                             "BorderStyle", "BorderTexture" }) do
+                            local mine = v[k]
+                            local glob = defs and defs[k]
+                            local tone = nil
+                            if mine == nil and glob ~= nil and glob ~= "NONE" then tone = "bad" end
+                            out:Item(k, ("effect=%s   global=%s"):format(tostring(mine), tostring(glob)), tone)
+                        end
+                    end
+                end
+                -- Placed instances carry their own copies; a marching ring could be on one.
+                for _, inst in ipairs(auraCfg.indicators or {}) do
+                    if type(inst) == "table" and inst.pihSignal then
+                        found = found + 1
+                        out:Section(("placed %s  [%s]"):format(tostring(inst.type or "?"), tostring(inst.pihSignal)))
+                        out:Item("BorderAnimationType", tostring(inst.BorderAnimationType))
+                        out:Item("BorderStyle", tostring(inst.BorderStyle))
+                        out:Item("anchor", tostring(inst.anchor))
+                    end
+                end
+            end
+        end
+
+        -- Icon groups are a third store and render their border from the GROUP's style table,
+        -- not the effect's -- so a marching ring here would come from somewhere else entirely.
+        for _, g in ipairs(adDB.otherLayoutGroups or {}) do
+            if type(g) == "table" and g.pihSignal then
+                found = found + 1
+                out:Section(("layout group  [%s]"):format(tostring(g.pihSignal)))
+                out:Item("name", tostring(g.name))
+                out:Item("BorderAnimationType", tostring(g.BorderAnimationType))
+                out:Item("maxIcons / iconSize", ("%s / %s"):format(tostring(g.maxIcons), tostring(g.iconSize)))
+                out:Item("othersOnly", tostring(g.othersOnly))
+            end
+        end
+
+        -- ☠ ICONS ASKED FOR vs ICONS BUILT. Field report 2026-09-09: "I had icons checked
+        -- but they never showed." The tick calls PIH_SetIconsShow and DISCARDS its return -- which
+        -- carries the reason it refused ("layout groups unavailable", "could not create the group",
+        -- "could not build the list"). So a failed build looks exactly like a working one. Until
+        -- that caller is fixed, this is how you tell them apart: what the settings ASK for, beside
+        -- whether a group actually exists in the preset you are standing in.
+        -- ☠ THE FOUR TICKS ARE NOT STORED THE SAME WAY, and that asymmetry IS the
+        -- suspected bug. `Cooldowns` is DERIVED -- PIH_IconsShow reads whether the icon group
+        -- links that list, so if the group is missing the tick simply reads back unticked and
+        -- nothing looks wrong. Trinkets / potions / racials are STORED FLAGS on the settings
+        -- table, set before the group work is attempted. So a failed group build leaves those
+        -- three reading TICKED with nothing on screen and no error -- which is exactly the
+        -- report: "I had icons checked but they never showed."
+        -- ⚠ THE MISMATCH IS THE FINDING. Stored flags on one line, what the group
+        -- actually links on the next; agreement is healthy, disagreement names the defect.
+        local st = pihSettings()
+        out:Section("icons")
+        if not st then
+            out:Item("settings", "none found", "warn")
+        else
+            local flags = {}
+            if st.trinkets then flags[#flags+1] = "trinkets" end
+            if st.potions  then flags[#flags+1] = "potions"  end
+            if st.racials  then flags[#flags+1] = "racials"  end
+            out:Item("amplifier flags stored", #flags > 0 and table.concat(flags, ", ") or "none")
+
+            local grp, linked = nil, 0
+            for _, g in ipairs(adDB.otherLayoutGroups or {}) do
+                if type(g) == "table" and g.pihSignal then grp = g break end
+            end
+            if not grp then
+                out:Item("icon group", "DOES NOT EXIST in this preset", #flags > 0 and "bad" or "warn")
+                if #flags > 0 then
+                    out:Line("Flags are set but no group exists -- the build failed silently, or the", "bad")
+                    out:Line("group lives in the other mode's preset. Either way nothing can render.", "bad")
+                end
+            else
+                for _ in pairs((grp.filterSelection and grp.filterSelection.customs) or {}) do
+                    linked = linked + 1
+                end
+                local cdLinked = st.cooldownFilterID and grp.filterSelection
+                    and grp.filterSelection.customs
+                    and grp.filterSelection.customs[st.cooldownFilterID] and true or false
+                out:Item("icon group", "exists", "good")
+                out:Item("lists linked to it", tostring(linked), linked == 0 and "bad" or nil)
+                out:Item("cooldown list linked", tostring(cdLinked))
+                out:Item("othersOnly", tostring(grp.othersOnly), grp.othersOnly and nil or "bad")
+                out:Item("maxIcons / iconSize", ("%s / %s"):format(tostring(grp.maxIcons), tostring(grp.iconSize)))
+                if linked == 0 then
+                    out:Line("A group linking no lists renders nothing, whatever the ticks say.", "bad")
+                end
+            end
+        end
+
+        if found == 0 then
+            out:Line(("No helper marks in the %s preset. If the helper shows in game, it lives in"):format(mode), "bad")
+            out:Line("the OTHER mode's preset -- which is the party/raid scope gap, not a border bug.", "bad")
+        end
+        out:Hints("/df debug pi border")
+        return
+    end
+
+    -- ☠ THE SOUND-API PROBE. Answers the question the 2026-09-09 field report opened:
+    -- is `C_UnitAuras.AddAuraSound` / `RemoveAuraSound` blocked only by COMBAT LOCKDOWN, or for
+    -- the whole restricted period (encounter / mythic+)? That decides what the helper's sound can
+    -- honestly promise -- silence that follows the gate, or a cue that admits it ignores it.
+    --
+    -- ⚠ WHY A PROBE AND NOT A READ OF OUR OWN CODE: the failure is INVISIBLE to pcall.
+    -- ADDON_ACTION_BLOCKED is not a Lua error -- the protected call simply does nothing and
+    -- `pcall` returns success. That is precisely how this shipped: `unregisterAuraSound` pcalls
+    -- and discards, so a blocked removal reported nothing at all. So this probe does NOT trust a
+    -- return value alone; it listens for the blocked event itself.
+    --
+    -- ⚠ AND IT MUST NOT LEAK. It registers one real sound to test with, so if the REMOVE
+    -- is the blocked half we are holding a live registration. The id is kept in a file-local and
+    -- retried at the top of the next run rather than dropped -- which is the exact mistake being
+    -- diagnosed. Registered against the player's own unit for Power Infusion, which cannot land
+    -- on the priest casting it during the window, so nothing is audible either way.
+    if msg == "sound" then
+        local out = DF:Out("PI Helper", "sound API restriction probe")
+        local UA = C_UnitAuras
+        local add = UA and UA.AddAuraSound
+        local rem = UA and (UA.RemoveAuraSound or UA.RemoveAuraAppliedSound)
+        if type(add) ~= "function" or type(rem) ~= "function" then
+            out:Line("sound API not present on this build -- nothing to measure.", "bad")
+            return
+        end
+
+        -- Retry anything a previous run could not release, before adding another.
+        if pihProbeLeakedID ~= nil then
+            pcall(rem, pihProbeLeakedID)
+            out:Field("retried leaked id from last run", tostring(pihProbeLeakedID), "warn")
+            pihProbeLeakedID = nil
+        end
+
+        -- WHICH state are we in? Printed first: the answer is meaningless without it.
+        local states = pihRestrictions()
+        local where = #states > 0 and table.concat(states, "+") or "no restrictions"
+        out:Field("restrictions", where, #states > 0 and "good" or "warn")
+        if #states == 0 then
+            out:Line("no restrictions active -- this run is the CONTROL: both calls must pass.", "neutral")
+        end
+
+        -- The blocked event is the only honest detector. Count only our own.
+        local seen = 0
+        local watcher = CreateFrame("Frame")
+        watcher:RegisterEvent("ADDON_ACTION_BLOCKED")
+        watcher:RegisterEvent("ADDON_ACTION_FORBIDDEN")
+        watcher:SetScript("OnEvent", function(_, _, who)
+            if who == "DandersFrames" then seen = seen + 1 end
+        end)
+
+        -- ☠ TWO ARGUMENT FORMS, NOT ONE. The first version of this probe passed a
+        -- built-in soundFileID and PASSED in full combat -- while the real path was being BLOCKED
+        -- in the same conditions. The probe was not reproducing the call it was meant to measure.
+        -- resolveSoundArg turns a LibSharedMedia key into a FILE PATH string and passes
+        -- `soundFileName`; playing an arbitrary file is a different privilege from playing a
+        -- built-in asset, and that -- not combat -- is the suspected discriminator.
+        -- ⚠ SO IT TESTS BOTH, AND USES THE USER'S OWN CONFIGURED SOUND for the path form.
+        -- A probe that passes an argument the real code never uses answers a question nobody asked.
+        local trig = Enum and Enum.UnitAuraSoundTrigger and Enum.UnitAuraSoundTrigger.Added
+        local id, addErr
+        local idB, addErrB, pathUsed
+
+        local function try(argKey, argVal)
+            if trig == nil then return nil, "this build's trigger enum has no 'Added'" end
+            local snd = { unitToken = "player", spellID = PI_SPELL_ID, outputChannel = "Master" }
+            snd[argKey] = argVal
+            local ok, res = pcall(add, trig, snd)
+            if ok then return res, nil end
+            return nil, tostring(res)
+        end
+
+        -- Form A: a built-in asset, by id. The control.
+        id, addErr = try("soundFileID", 567458)
+
+        -- Form B: exactly what the helper registers -- the configured sound, as a path.
+        pathUsed = pihSoundCfg and (DF.GetSoundPath and DF:GetSoundPath(pihSoundCfg.soundLSMKey))
+            or (pihSoundCfg and pihSoundCfg.soundFile) or nil
+        if type(pathUsed) == "string" and pathUsed ~= "" then
+            idB, addErrB = try("soundFileName", pathUsed)
+        elseif type(pathUsed) == "number" then
+            idB, addErrB = try("soundFileID", pathUsed)
+        else
+            addErrB = "no sound configured -- pick one in the panel and re-run"
+        end
+
+        local removeTried = false
+        if id  ~= nil then removeTried = true; pcall(rem, id)  end
+        if idB ~= nil then removeTried = true; pcall(rem, idB) end
+
+        -- The blocked event lands on the next dispatch, not inline, so the verdict waits.
+        C_Timer.After(0.3, function()
+            watcher:UnregisterAllEvents()
+            watcher:SetScript("OnEvent", nil)
+
+            local o2 = DF:Out("PI Helper", "sound API result")
+            o2:Field("restrictions", where)
+                :Field("A: built-in fileID",
+                       addErr or (id ~= nil and ("id " .. tostring(id)) or "NIL"),
+                       (id ~= nil) and "good" or "bad")
+                :Field("B: your sound, as a path",
+                       addErrB or (idB ~= nil and ("id " .. tostring(idB)) or "NIL"),
+                       (idB ~= nil) and "good" or "bad")
+                :Field("   path tried", tostring(pathUsed))
+                :Field("RemoveAuraSound attempted", removeTried and "yes" or "no (nothing to remove)")
+                :Field("blocked events seen", seen, seen > 0 and "bad" or "good")
+
+            -- ⚠ THE COMPARISON IS THE POINT. One form working while the other does not
+            -- localises the fault to the ARGUMENT rather than to combat, which is the difference
+            -- between "sound cannot follow the gate" and "custom media files cannot be registered".
+            if id ~= nil and idB == nil then
+                o2:Line("A passed, B failed -- the FILE PATH is the problem, not combat.", "bad")
+                o2:Line("A built-in sound would work where your media-pack file does not.", "warn")
+            elseif id == nil and idB ~= nil then
+                o2:Line("B passed, A failed -- unexpected; tell me, this inverts the theory.", "warn")
+            end
+
+            -- ⚠ THE VERDICT NAMES THE STATE. "Blocked" with no state attached is exactly
+            -- the shape of the finding that misled us.
+            if seen == 0 and id ~= nil and idB ~= nil then
+                o2:Line(("PASS in [%s] -- both calls went through."):format(where), "good")
+                if #states == 0 then
+                    o2:Line("Control run only. Re-run in combat, then on a raid boss, then in a key.", "warn")
+                end
+            elseif seen > 0 then
+                o2:Line(("BLOCKED in [%s] -- the sound API is protected here."):format(where), "bad")
+            else
+                o2:Line(("FAILED in [%s] with no block event -- the call was rejected, not restricted."):format(where), "warn")
+            end
+
+            -- If the REMOVE was the blocked half we are still holding it. Say so, and keep it.
+            if seen > 0 and (id ~= nil or idB ~= nil) then
+                pihProbeLeakedID = id or idB
+                o2:Line("Holding the registration -- the next run retries releasing it.", "warn")
+            end
+            o2:Hints("/df debug pi sound")
+        end)
+        return
+    end
 
     -- INTENT AND REALITY ARE PRINTED SEPARATELY, ON PURPOSE. Our variable records what the gate
     -- was last TOLD; the chokepoint records what containers are actually being handed. They are
@@ -670,6 +1156,21 @@ SlashCmdList["DFPI"] = function(msg)
         :Field("chokepoint says", dark and "DARK" or "OPEN",
                dark == (not pihGateOpen) and "good" or "bad")
         :Field("gate enabled", tostring(pihGateEnabled))
+        -- ⚠ THE SCOPE LINE. Marks follow the mode you are in; the BEHAVIOUR below (roles,
+        -- the gate switch, the sound) is read from the first preset that has a helper, party first.
+        -- When those two differ the helper is obeying settings from a preset that is not on screen,
+        -- and that is a limitation of the read, not a fault in anything it reports.
+        :Field("settings read from", (function()
+            local here = (DF.GetCurrentMode and DF:GetCurrentMode()) or "?"
+            pihSettings()   -- refresh pihSettingsMode; cheap, and never in a frame update
+            if not pihSettingsMode then return ("no helper found (you are in %s)"):format(here) end
+            if pihSettingsMode == here then return ("%s preset (matches where you are)"):format(here) end
+            return ("%s preset -- BUT YOU ARE IN %s"):format(pihSettingsMode, here)
+        end)(), (function()
+            local here = (DF.GetCurrentMode and DF:GetCurrentMode()) or "?"
+            if not pihSettingsMode then return "warn" end
+            return (pihSettingsMode == here) and "good" or "bad"
+        end)())
         :Field("gate spell", ("%d (%s)"):format(PI_SPELL_ID,
                tostring((C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(PI_SPELL_ID)) or "?")))
         :Field("gate spell ready", tostring(pihReadReady()))
@@ -709,6 +1210,16 @@ SlashCmdList["DFPI"] = function(msg)
             -- would teach the reader to ignore the line that matters.
             (pihSoundCfg and pihGateOpen and pihLastArmCount == 0
              and GetNumGroupMembers and GetNumGroupMembers() > 1) and "bad" or "neutral")
+        -- ⚠ THE COOLDOWN LIST IS WHAT SOUND REGISTERS FROM. If this reads NIL, every
+        -- frame will report "no spells after class narrowing" and the count above is zero for a
+        -- reason that has nothing to do with sound at all.
+        :Field("cooldown list resolves", (function()
+            local m = pihResolvedMap()
+            if not m then return "NIL -- nothing to register" end
+            local c = 0
+            for _ in pairs(m) do c = c + 1 end
+            return ("%d spell%s"):format(c, c == 1 and "" or "s")
+        end)(), pihResolvedMap() and "good" or "bad")
         :Field("gated containers live", (function()
             local AC = DF.AuraContainer
             local n = 0
@@ -730,5 +1241,14 @@ SlashCmdList["DFPI"] = function(msg)
         -- indistinguishable from a broken gate unless the readout says so.
         out2 = out2:Line("test mode is ON: gate changes do not redraw test previews", "neutral")
     end
-    out2:Hints("/df debug pi off", "/df debug pi on", "/df debug pi auto")
+    -- ⚠ WHY THE LAST ARM PASS PRODUCED NOTHING, per distinct reason. Printed only when
+    -- there is something to explain, so a healthy readout does not grow a section about a
+    -- problem it does not have.
+    if pihLastArmReasons then
+        out2:Section("frames that registered nothing")
+        for why, howMany in pairs(pihLastArmReasons) do
+            out2:Item(("%d"):format(howMany), why, "warn")
+        end
+    end
+    out2:Hints("/df debug pi all", "/df debug pi off", "/df debug pi on", "/df debug pi auto")
 end
